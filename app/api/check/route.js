@@ -8,6 +8,7 @@
 //       ("source":"네이버 가격비교") 로 박혀 있어서 오탐난다 -> 신호로 쓰지 않음.
 
 import { request, getGlobalDispatcher, interceptors } from "undici";
+import { gunzipSync, brotliDecompressSync, inflateSync, inflateRawSync } from "node:zlib";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -31,10 +32,20 @@ function clean(s) {
     .trim();
 }
 
-function browserHeaders() {
-  return {
-    "user-agent":
-      "Mozilla/5.0 (Linux; Android 14; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+// 모바일 UA 풀 (재시도마다 로테이션)
+const UA_POOL = [
+  "Mozilla/5.0 (Linux; Android 14; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+  "Mozilla/5.0 (Linux; Android 13; SM-G991N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+];
+
+function browserHeaders(uaIdx = 0) {
+  const ua = UA_POOL[uaIdx % UA_POOL.length];
+  const isIphone = /iPhone/.test(ua);
+  const h = {
+    "user-agent": ua,
     accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
     "accept-language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -43,13 +54,20 @@ function browserHeaders() {
     referer: "https://m.naver.com/",
     "sec-ch-ua": '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
     "sec-ch-ua-mobile": "?1",
-    "sec-ch-ua-platform": '"Android"',
+    "sec-ch-ua-platform": isIphone ? '"iOS"' : '"Android"',
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-site",
     "sec-fetch-user": "?1",
     "upgrade-insecure-requests": "1",
   };
+  if (isIphone) {
+    // Safari는 sec-ch-ua 계열을 안 보냄 -> 지문 정합 위해 제거
+    delete h["sec-ch-ua"];
+    delete h["sec-ch-ua-mobile"];
+    delete h["sec-ch-ua-platform"];
+  }
+  return h;
 }
 
 // shp_tli 블록 영역(<section ... data-slog-container="shp_tli"> ... </section>)만 잘라낸다
@@ -85,18 +103,31 @@ function parseCards(blockHtml) {
   return cards;
 }
 
-async function fetchSerp(keyword, cookie) {
+async function fetchSerp(keyword, cookie, uaIdx = 0) {
   const url =
     "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
     encodeURIComponent(keyword);
-  const headers = browserHeaders();
+  const headers = browserHeaders(uaIdx);
   if (cookie) headers.cookie = cookie;
   const res = await request(url, {
     method: "GET",
     headers,
     dispatcher: redirectDispatcher,
   });
-  const html = await res.body.text();
+  // undici request()는 자동 압축해제 안 함 -> content-encoding 보고 직접 푼다
+  const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+  const buf = Buffer.from(await res.body.arrayBuffer());
+  let html;
+  try {
+    if (enc.includes("br")) html = brotliDecompressSync(buf).toString("utf8");
+    else if (enc.includes("gzip")) html = gunzipSync(buf).toString("utf8");
+    else if (enc.includes("deflate")) {
+      try { html = inflateSync(buf).toString("utf8"); }
+      catch { html = inflateRawSync(buf).toString("utf8"); }
+    } else html = buf.toString("utf8");
+  } catch {
+    html = buf.toString("utf8");
+  }
   return { status: res.statusCode, html };
 }
 
@@ -114,10 +145,12 @@ export async function POST(req) {
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
     let attempt;
-    for (let t = 0; t < 2; t++) {
-      attempt = await fetchSerp(keyword, cookie);
+    const MAX_TRY = 3;
+    for (let t = 0; t < MAX_TRY; t++) {
+      const uaIdx = (Math.floor(Math.random() * UA_POOL.length) + t) % UA_POOL.length;
+      attempt = await fetchSerp(keyword, cookie, uaIdx);
       if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
-      await sleep(500);
+      if (t < MAX_TRY - 1) await sleep(500 + t * 600 + Math.floor(Math.random() * 300)); // 백오프+지터
     }
     const { status, html } = attempt;
 
