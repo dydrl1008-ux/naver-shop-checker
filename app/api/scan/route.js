@@ -14,7 +14,8 @@ const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
 
 const BLOCK_SIGNALS = ["네이버 가격비교", "다른 사이트 더보기", "다른 사이트를 보시려면"];
-const BLOCK_DENY = ["자동등록방지", "비정상적인 검색", "/sorry/", "captcha", "robot"];
+// 실제 차단 페이지에만 나오는 강한 시그널 (정상 SERP엔 없음)
+const BLOCK_DENY = ["/sorry/unauth", "비정상적인 검색이 감지"];
 
 function buildUrl(keyword, source) {
   const q = encodeURIComponent(keyword);
@@ -98,7 +99,8 @@ export async function POST(req) {
     const htmlLen = html.length;
 
     const denyHit = BLOCK_DENY.filter((s) => html.includes(s));
-    const looksBlocked = status === 302 || status === 429 || htmlLen < 3000 || denyHit.length > 0;
+    // 정상 통검 SERP는 보통 200KB+ . 차단/캡차/sorry 페이지는 수십KB 이하.
+    const looksBlocked = status === 302 || status === 429 || htmlLen < 50000 || denyHit.length > 0;
     if (looksBlocked) {
       return Response.json({
         keyword, source, status, htmlLen, blocked: true,
@@ -106,7 +108,7 @@ export async function POST(req) {
           status === 302 ? "리다이렉트(차단 의심)" :
           status === 429 ? "요청 과다(429)" :
           denyHit.length ? `차단 시그널: ${denyHit.join(", ")}` :
-          "응답 비정상(HTML 너무 짧음)",
+          "응답 비정상(HTML 너무 짧음 <50KB)",
         note: cookie ? "쿠키 넣어도 막힘 → 프록시/상시서버 권장" : "쿠키 없이 막힘 → 로그인 쿠키 또는 프록시 시도",
       });
     }
