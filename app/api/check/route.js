@@ -1,102 +1,164 @@
 // app/api/check/route.js
-// 키워드 1개 -> 네이버 쇼핑 검색 API(organic, 광고 미포함)
-//  1) 가격비교 블록 뜨는 키워드인지 (= 검색 최상단에 가격비교 카탈로그가 있는지)
-//  2) 내 nvMid 상품이 광고 제외 자연순위 N등 이내인지 (기본 4등)
+// 모바일 통합검색(m.search.naver.com) 페이지를 직접 긁어서
+//  1) "네이버 가격비교" 블록이 실제로 렌더됐는지 (= shp_tli 컨테이너 존재)
+//  2) 내 nvMid 상품이 그 블록 안에 있는지 + 광고 제외 N등(기본 4) 이내인지
+//
+// 핵심: 블록 판별은 data-slog-container="shp_tli" 존재로만 한다.
+//       텍스트 "네이버 가격비교"는 블록이 없는 페이지에도 JSON 데이터
+//       ("source":"네이버 가격비교") 로 박혀 있어서 오탐난다 -> 신호로 쓰지 않음.
+
+import { request } from "undici";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
 
-// 가격비교 "카탈로그" 상품군 (productType 공식 매핑)
-//  1: 일반-가격비교, 4: 중고-가격비교, 7: 단종-가격비교, 10: 판매예정-가격비교
-const CATALOG_TYPES = new Set(["1", "4", "7", "10"]);
-const BLOCK_WINDOW = 10; // 가격비교 블록 판별용 상단 구간
-
-const TYPE_LABEL = {
-  "1": "가격비교",      "2": "일반(단독)",   "3": "가격비교매칭",
-  "4": "중고-가격비교", "5": "중고(단독)",   "6": "중고-매칭",
-  "7": "단종-가격비교", "8": "단종(단독)",   "9": "단종-매칭",
-  "10": "예정-가격비교","11": "예정(단독)",  "12": "예정-매칭",
-};
+// 블록 자체가 비어 보일 만큼 HTML이 짧으면 차단(캡차) 의심
+const MIN_HTML_LEN = 50_000;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function clean(s) {
   if (!s) return "";
-  return s.replace(/<[^>]*>/g, "")
+  return s
+    .replace(/<[^>]*>/g, "")
     .replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").trim();
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+function browserHeaders() {
+  return {
+    "user-agent":
+      "Mozilla/5.0 (Linux; Android 14; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    accept:
+      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "accept-language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "accept-encoding": "gzip, deflate, br",
+    "cache-control": "max-age=0",
+    referer: "https://m.naver.com/",
+    "sec-ch-ua": '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
+    "sec-ch-ua-mobile": "?1",
+    "sec-ch-ua-platform": '"Android"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "same-site",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
+  };
+}
+
+// shp_tli 블록 영역(<section ... data-slog-container="shp_tli"> ... </section>)만 잘라낸다
+function sliceBlock(html) {
+  const at = html.indexOf('data-slog-container="shp_tli"');
+  if (at === -1) return null;
+  const start = html.lastIndexOf("<section", at);
+  const from = start === -1 ? at : start;
+  // 다음 </section> 까지 (넉넉히 자름 — 카드 파싱용)
+  const end = html.indexOf("</section>", at);
+  return html.slice(from, end === -1 ? from + 400_000 : end + 10);
+}
+
+// 블록 안의 카드들을 문서 순서대로 파싱
+// 카드 경계: data-slog-content="shp_tli:{slot}"
+function parseCards(blockHtml) {
+  const cards = [];
+  const re = /data-slog-content="shp_tli:([^"]+)"/g;
+  let m;
+  const idxs = [];
+  while ((m = re.exec(blockHtml)) !== null) idxs.push({ slot: m[1], at: m.index });
+  for (let i = 0; i < idxs.length; i++) {
+    const seg = blockHtml.slice(idxs[i].at, idxs[i + 1] ? idxs[i + 1].at : blockHtml.length);
+    const slot = idxs[i].slot;
+    // nvMid: view_type_guide_{nvMid} 가 가장 안정적, 없으면 nv_mid=
+    let nvMid = (seg.match(/view_type_guide_(\d+)/) || [])[1] ||
+                (seg.match(/nv_mid=(\d+)/) || [])[1] || null;
+    const isAd = slot.startsWith("nad-") || /ader\.naver\.com/.test(seg) || />광고</.test(seg);
+    const mall = clean((seg.match(/class="PtxugWXH"[^>]*>([^<]+)</) || [])[1] || "");
+    const price = (seg.match(/class="mjquFHz_"[^>]*>([\d,]+)</) || [])[1] || "";
+    cards.push({ nvMid, isAd, mall, price });
+  }
+  return cards;
+}
+
+async function fetchSerp(keyword, cookie) {
+  const url =
+    "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
+    encodeURIComponent(keyword);
+  const headers = browserHeaders();
+  if (cookie) headers.cookie = cookie;
+  const res = await request(url, { method: "GET", headers, maxRedirections: 3 });
+  const html = await res.body.text();
+  return { status: res.statusCode, html };
+}
 
 export async function POST(req) {
   try {
     const body = await req.json();
     const keyword = (body.keyword || "").trim();
     const targetMid = (body.targetMid || "").toString().trim();
-    let maxResults = parseInt(body.maxResults, 10) || 100;
-    maxResults = Math.min(Math.max(maxResults, 40), 1000);
-    let cut = parseInt(body.cut, 10) || 4;          // 노출 인정 등수 (기본 4등)
-    cut = Math.min(Math.max(cut, 1), 100);
+    let cut = parseInt(body.cut, 10) || 4;             // 노출 인정 등수 (기본 4)
+    cut = Math.min(Math.max(cut, 1), 50);
+    const adExclude = body.adExclude !== false;        // 기본 true: 광고 제외하고 순위
+    const cookie = (body.cookie || process.env.NAVER_COOKIE || "").trim();
 
-    const clientId = process.env.NAVER_CLIENT_ID;
-    const clientSecret = process.env.NAVER_CLIENT_SECRET;
-    if (!clientId || !clientSecret)
-      return Response.json({ error: "NAVER_CLIENT_ID / NAVER_CLIENT_SECRET 환경변수가 없습니다." }, { status: 500 });
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
-    const pages = Math.ceil(maxResults / 100);
-    let items = [];
-    let total = 0;
+    let attempt;
+    for (let t = 0; t < 2; t++) {
+      attempt = await fetchSerp(keyword, cookie);
+      if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
+      await sleep(500);
+    }
+    const { status, html } = attempt;
 
-    for (let p = 0; p < pages; p++) {
-      const start = p * 100 + 1;
-      if (start > 1000) break;
-      const url = "https://openapi.naver.com/v1/search/shop.json" +
-        `?query=${encodeURIComponent(keyword)}&display=100&start=${start}&sort=sim`;
-      const res = await fetch(url, {
-        headers: { "X-Naver-Client-Id": clientId, "X-Naver-Client-Secret": clientSecret },
-        cache: "no-store",
+    // 차단/캡차 의심
+    if (status !== 200 || html.length < MIN_HTML_LEN) {
+      return Response.json({
+        keyword, status, htmlLen: html.length,
+        blocked: true,
+        error: `차단 의심 (status ${status}, ${Math.round(html.length / 1024)}KB). 쿠키 붙이거나 잠시 후 재시도.`,
       });
-      if (!res.ok) {
-        const txt = await res.text().catch(() => "");
-        return Response.json({ error: `네이버 API 오류 (${res.status}) ${txt.slice(0, 160)}` }, { status: 502 });
-      }
-      const data = await res.json();
-      total = Number(data.total) || total;
-      const batch = data.items || [];
-      items = items.concat(batch);
-      if (batch.length < 100) break;
-      if (p < pages - 1) await sleep(80);
     }
 
-    // 1) 가격비교 블록 유무 — 상단 BLOCK_WINDOW 안에 카탈로그가 있는지
-    const blockTop = items.slice(0, BLOCK_WINDOW);
-    const catalogInBlock = blockTop.filter((it) => CATALOG_TYPES.has(String(it.productType))).length;
-    const top1IsCatalog = items.length > 0 && CATALOG_TYPES.has(String(items[0].productType));
-    const hasPriceComparison = catalogInBlock > 0;
+    // ★ 블록 판별: shp_tli 컨테이너 존재 여부 (텍스트 매칭 X)
+    const blockHtml = sliceBlock(html);
+    const hasBlock = blockHtml !== null;
 
-    // 2) 내 nvMid 순위 (광고 제외 자연순위) + cut 등 이내인지
-    let myRank = null, myItem = null;
-    if (targetMid) {
-      const idx = items.findIndex((it) => String(it.productId) === targetMid);
-      if (idx >= 0) {
-        const it = items[idx];
-        myRank = idx + 1;
-        myItem = {
-          title: clean(it.title),
-          mallName: it.mallName || "",
-          lprice: it.lprice || "",
-          productType: String(it.productType),
-          productTypeLabel: TYPE_LABEL[String(it.productType)] || it.productType,
-          link: it.link || "",
-        };
+    let cards = [], myRank = null, myOrganicRank = null, myItem = null;
+    if (hasBlock) {
+      cards = parseCards(blockHtml);
+      let organic = 0;
+      for (let i = 0; i < cards.length; i++) {
+        const c = cards[i];
+        if (!c.isAd) organic++;
+        if (targetMid && c.nvMid === targetMid) {
+          myRank = i + 1;                 // 광고 포함 raw 순위
+          myOrganicRank = c.isAd ? null : organic; // 광고 제외 순위
+          myItem = c;
+          break;
+        }
       }
     }
-    const myWithinCut = myRank !== null && myRank <= cut;
+
+    const rankForCut = adExclude ? myOrganicRank : myRank;
+    const myWithinCut = rankForCut !== null && rankForCut <= cut;
 
     return Response.json({
-      keyword, targetMid: targetMid || null, total, fetched: items.length,
-      cut, blockWindow: BLOCK_WINDOW,
-      hasPriceComparison, top1IsCatalog, catalogInBlock,
-      myFound: myRank !== null, myRank, myWithinCut, myItem,
+      keyword,
+      status,
+      htmlLen: html.length,
+      blocked: false,
+      hasBlock,
+      cardCount: cards.length,
+      adCount: cards.filter((c) => c.isAd).length,
+      targetMid: targetMid || null,
+      cut,
+      adExclude,
+      myFound: myRank !== null,
+      myRank,
+      myOrganicRank,
+      myWithinCut,
+      myItem,
     });
   } catch (e) {
     return Response.json({ error: e?.message || "알 수 없는 오류" }, { status: 500 });

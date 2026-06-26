@@ -1,6 +1,6 @@
 {
   "name": "naver-shop-checker",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "dev": "next dev",
@@ -8,9 +8,9 @@
     "start": "next start"
   },
   "dependencies": {
-    "next": "^14.2.35",
+    "next": "14.2.5",
     "react": "18.3.1",
     "react-dom": "18.3.1",
-    "undici": "^8.5.0"
+    "undici": "6.19.8"
   }
 }
