@@ -36,7 +36,44 @@ export default function Home() {
   const [rows, setRows] = useState([]);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [copied, setCopied] = useState(false);
   const stopRef = useRef(false);
+  const outRef = useRef(null);
+
+  // 블록 O + 내 상품 N등 이내인 키워드만 (중복 제거)
+  const goodKeywords = useMemo(() => {
+    const seen = new Set();
+    return rows
+      .filter((r) => r.hasBlock && r.myWithinCut)
+      .map((r) => r.keyword)
+      .filter((k) => (seen.has(k) ? false : (seen.add(k), true)));
+  }, [rows]);
+  const goodText = goodKeywords.join(",");
+
+  async function copyGood() {
+    const text = goodText;
+    if (!text) return;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch {
+      // 클립보드 API 막힌 환경 폴백
+      const ta = outRef.current || document.createElement("textarea");
+      if (!outRef.current) {
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.opacity = "0";
+        document.body.appendChild(ta);
+      }
+      ta.focus();
+      ta.select();
+      try { ok = document.execCommand("copy"); } catch {}
+      if (!outRef.current) document.body.removeChild(ta);
+    }
+    setCopied(ok);
+    setTimeout(() => setCopied(false), 1500);
+  }
 
   const list = useMemo(() => parseInput(keywords, globalMid), [keywords, globalMid]);
 
@@ -196,6 +233,26 @@ export default function Home() {
             {progress.done} / {progress.total}
           </span>
         )}
+      </div>
+
+      <div className="goodbox">
+        <div className="goodhead">
+          <span>
+            블록 O + 내 상품 {cut}등 이내 <b>{goodKeywords.length}</b>개
+          </span>
+          <button className="copy" onClick={copyGood} disabled={!goodKeywords.length}>
+            {copied ? "복사됨 ✓" : "복사"}
+          </button>
+        </div>
+        <textarea
+          ref={outRef}
+          className="goodout"
+          readOnly
+          value={goodText}
+          placeholder="검사 끝나면 여기 키워드1,키워드2 형식으로 모임 (클릭하면 전체 선택)"
+          onClick={(e) => e.target.select()}
+          rows={3}
+        />
       </div>
 
       <div className="tablebox">
