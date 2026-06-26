@@ -70,22 +70,24 @@ function browserHeaders(uaIdx = 0) {
   return h;
 }
 
-// shp_tli 블록 영역(<section ... data-slog-container="shp_tli"> ... </section>)만 잘라낸다
+// "네이버 가격비교</h2>" 렌더 헤더가 있는 블록 영역을 잘라낸다.
+// 컨테이너 이름(shp_tli / shp_lis 등)이 키워드마다 달라서 이름으로 안 잡고
+// 실제 렌더된 헤더로 판별한다. (텍스트 "네이버 가격비교"는 JSON/"더보기"에도
+// 있으므로 반드시 </h2> 붙은 헤더만 인정.)
 function sliceBlock(html) {
-  const at = html.indexOf('data-slog-container="shp_tli"');
-  if (at === -1) return null;
-  const start = html.lastIndexOf("<section", at);
-  const from = start === -1 ? at : start;
-  // 다음 </section> 까지 (넉넉히 자름 — 카드 파싱용)
-  const end = html.indexOf("</section>", at);
+  const m = html.search(/네이버 가격비교<\/h2>/);
+  if (m === -1) return null;
+  const start = html.lastIndexOf("<section", m);
+  const from = start === -1 ? Math.max(0, m - 2000) : start;
+  const end = html.indexOf("</section>", m);
   return html.slice(from, end === -1 ? from + 400_000 : end + 10);
 }
 
 // 블록 안의 카드들을 문서 순서대로 파싱
-// 카드 경계: data-slog-content="shp_tli:{slot}"
+// 카드 경계: data-slog-content="{컨테이너}:{슬롯}" (컨테이너는 shp_lis/shp_tli 등)
 function parseCards(blockHtml) {
   const cards = [];
-  const re = /data-slog-content="shp_tli:([^"]+)"/g;
+  const re = /data-slog-content="[^":]*:([^"]+)"/g;
   let m;
   const idxs = [];
   while ((m = re.exec(blockHtml)) !== null) idxs.push({ slot: m[1], at: m.index });
@@ -164,11 +166,12 @@ export async function POST(req) {
       });
     }
 
-    // 진단용: raw HTML에 어떤 후보 신호가 있는지 (블록 판별은 shp_tli로만)
+    // 진단용: raw HTML에 어떤 후보 신호가 있는지 (블록 판별은 헤더로만)
     const signals = {
+      blockHeader: /네이버 가격비교<\/h2>/.test(html), // ★ 실제 판별 기준
       shpTli: html.includes('data-slog-container="shp_tli"'),
+      shpLis: html.includes('data-slog-container="shp_lis"'),
       textPriceCompare: html.includes("네이버 가격비교"),
-      otherSiteLink: html.includes("다른 사이트"),
       shoppingApi: /cr\d?\.shopping\.naver\.com|msearch\.shopping\.naver\.com/.test(html),
     };
 
