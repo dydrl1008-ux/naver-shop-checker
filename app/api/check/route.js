@@ -182,16 +182,30 @@ export async function POST(req) {
     let cards = [], myRank = null, myOrganicRank = null, myItem = null;
     if (hasBlock) {
       cards = parseCards(blockHtml);
+      // 같은 nvMid가 광고+오가닉으로 둘 다 뜰 수 있음 -> 오가닉 우선
       let organic = 0;
+      let adHit = null;   // 광고로 처음 만난 위치
+      let orgHit = null;  // 오가닉으로 만난 위치
       for (let i = 0; i < cards.length; i++) {
         const c = cards[i];
         if (!c.isAd) organic++;
         if (targetMid && c.nvMid === targetMid) {
-          myRank = i + 1;                 // 광고 포함 raw 순위
-          myOrganicRank = c.isAd ? null : organic; // 광고 제외 순위
-          myItem = c;
-          break;
+          if (c.isAd) {
+            if (!adHit) adHit = { rank: i + 1, item: c };
+          } else {
+            orgHit = { rank: i + 1, organic, item: c };
+            break; // 오가닉 찾으면 끝
+          }
         }
+      }
+      if (orgHit) {
+        myRank = orgHit.rank;
+        myOrganicRank = orgHit.organic;
+        myItem = orgHit.item;
+      } else if (adHit) {
+        myRank = adHit.rank;
+        myOrganicRank = null; // 광고로만 노출
+        myItem = adHit.item;
       }
     }
 
