@@ -7,8 +7,39 @@
 //       텍스트 "네이버 가격비교"는 블록이 없는 페이지에도 JSON 데이터
 //       ("source":"네이버 가격비교") 로 박혀 있어서 오탐난다 -> 신호로 쓰지 않음.
 
-import { request, getGlobalDispatcher, interceptors } from "undici";
+import { request, getGlobalDispatcher, interceptors, ProxyAgent } from "undici";
 import { gunzipSync, brotliDecompressSync, inflateSync, inflateRawSync } from "node:zlib";
+
+// 프록시 줄 파싱: "host:port:user:pass" / "host:port" / "user:pass@host:port" / "http://..."
+function parseProxies(raw) {
+  if (!raw) return [];
+  return String(raw)
+    .split(/[\n,]+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((line) => {
+      if (/^https?:\/\//i.test(line)) return line;
+      if (line.includes("@")) return "http://" + line;
+      const p = line.split(":");
+      if (p.length === 4) {
+        const [host, port, user, pass] = p;
+        return `http://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${host}:${port}`;
+      }
+      if (p.length === 2) return `http://${p[0]}:${p[1]}`;
+      return null;
+    })
+    .filter(Boolean);
+}
+
+// 디버그 표시용: 프록시 URL에서 host:port만 추출
+function proxyLabel(u) {
+  try {
+    const x = new URL(u);
+    return x.hostname + ":" + x.port;
+  } catch {
+    return "?";
+  }
+}
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
@@ -105,32 +136,41 @@ function parseCards(blockHtml) {
   return cards;
 }
 
-async function fetchSerp(keyword, cookie, uaIdx = 0) {
+async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null) {
   const url =
     "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
     encodeURIComponent(keyword);
   const headers = browserHeaders(uaIdx);
   if (cookie) headers.cookie = cookie;
-  const res = await request(url, {
-    method: "GET",
-    headers,
-    dispatcher: redirectDispatcher,
-  });
-  // undici request()는 자동 압축해제 안 함 -> content-encoding 보고 직접 푼다
-  const enc = String(res.headers["content-encoding"] || "").toLowerCase();
-  const buf = Buffer.from(await res.body.arrayBuffer());
-  let html;
-  try {
-    if (enc.includes("br")) html = brotliDecompressSync(buf).toString("utf8");
-    else if (enc.includes("gzip")) html = gunzipSync(buf).toString("utf8");
-    else if (enc.includes("deflate")) {
-      try { html = inflateSync(buf).toString("utf8"); }
-      catch { html = inflateRawSync(buf).toString("utf8"); }
-    } else html = buf.toString("utf8");
-  } catch {
-    html = buf.toString("utf8");
+
+  let proxyAgent = null;
+  let dispatcher = redirectDispatcher;
+  if (proxyUrl) {
+    proxyAgent = new ProxyAgent({ uri: proxyUrl, headersTimeout: 9000, bodyTimeout: 9000 });
+    dispatcher = proxyAgent.compose(interceptors.redirect({ maxRedirections: 3 }));
   }
-  return { status: res.statusCode, html };
+  try {
+    const res = await request(url, { method: "GET", headers, dispatcher });
+    const enc = String(res.headers["content-encoding"] || "").toLowerCase();
+    const buf = Buffer.from(await res.body.arrayBuffer());
+    let html;
+    try {
+      if (enc.includes("br")) html = brotliDecompressSync(buf).toString("utf8");
+      else if (enc.includes("gzip")) html = gunzipSync(buf).toString("utf8");
+      else if (enc.includes("deflate")) {
+        try { html = inflateSync(buf).toString("utf8"); }
+        catch { html = inflateRawSync(buf).toString("utf8"); }
+      } else html = buf.toString("utf8");
+    } catch {
+      html = buf.toString("utf8");
+    }
+    return { status: res.statusCode, html, err: null };
+  } catch (e) {
+    // 죽은 프록시/연결 실패 등
+    return { status: 0, html: "", err: e?.message || "fetch error" };
+  } finally {
+    if (proxyAgent) { try { await proxyAgent.close(); } catch {} }
+  }
 }
 
 export async function POST(req) {
@@ -143,25 +183,39 @@ export async function POST(req) {
     cut = Math.min(Math.max(cut, 1), 50);
     const adExclude = body.adExclude !== false;        // 기본 true: 광고 제외하고 순위
     const cookie = (body.cookie || process.env.NAVER_COOKIE || "").trim();
+    const proxies = parseProxies(body.proxies || process.env.NAVER_PROXIES || "");
+    let proxyStart = parseInt(body.proxyStart, 10);
+    if (!Number.isFinite(proxyStart)) proxyStart = 0;
 
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
     let attempt;
-    const MAX_TRY = 3;
+    let usedProxy = null;
+    // 프록시 있으면 개수만큼(최대 6) 돌려가며 시도, 없으면 3회
+    const MAX_TRY = proxies.length ? Math.min(Math.max(proxies.length, 2), 6) : 3;
     for (let t = 0; t < MAX_TRY; t++) {
       const uaIdx = (Math.floor(Math.random() * UA_POOL.length) + t) % UA_POOL.length;
-      attempt = await fetchSerp(keyword, cookie, uaIdx);
+      const proxyUrl = proxies.length ? proxies[(proxyStart + t) % proxies.length] : null;
+      usedProxy = proxyUrl ? proxyLabel(proxyUrl) : null;
+      attempt = await fetchSerp(keyword, cookie, uaIdx, proxyUrl);
       if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
-      if (t < MAX_TRY - 1) await sleep(500 + t * 600 + Math.floor(Math.random() * 300)); // 백오프+지터
+      // 다음 프록시로 바로 넘어가므로 대기는 짧게 (프록시 없을 땐 백오프 길게)
+      if (t < MAX_TRY - 1) {
+        await sleep(proxies.length ? 150 : 500 + t * 600 + Math.floor(Math.random() * 300));
+      }
     }
     const { status, html } = attempt;
 
     // 차단/캡차 의심
     if (status !== 200 || html.length < MIN_HTML_LEN) {
+      const why = attempt.err
+        ? `프록시/연결 실패 (${attempt.err})`
+        : `차단 의심 (status ${status}, ${Math.round(html.length / 1024)}KB)`;
       return Response.json({
         keyword, status, htmlLen: html.length,
         blocked: true,
-        error: `차단 의심 (status ${status}, ${Math.round(html.length / 1024)}KB). 쿠키 붙이거나 잠시 후 재시도.`,
+        usedProxy,
+        error: `${why}${usedProxy ? ` [proxy ${usedProxy}]` : ""}. 쿠키/프록시 확인 후 재시도.`,
         ...(debug ? { htmlSample: html } : {}),
       });
     }
@@ -229,6 +283,7 @@ export async function POST(req) {
       myWithinCut,
       myItem,
       signals,
+      usedProxy,
       ...(debug ? { htmlSample: html } : {}),
     });
   } catch (e) {

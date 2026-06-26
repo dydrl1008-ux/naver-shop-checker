@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 // 키워드 입력 파싱: 줄바꿈/콤마로 키워드 분리, "키워드<탭>nvMid" 면 그 줄만 nvMid 지정
 function parseInput(text, globalMid) {
@@ -33,7 +33,45 @@ export default function Home() {
   const [cut, setCut] = useState(4);
   const [adExclude, setAdExclude] = useState(true);
   const [cookie, setCookie] = useState("");
+  const [proxies, setProxies] = useState("");
+  const [interval, setIntervalMs] = useState(0.35);
+  const [aliveCount, setAliveCount] = useState(0);
   const [rows, setRows] = useState([]);
+  const deadRef = useRef(new Map()); // proxyLine -> 복귀시각(ts)
+  const cursorRef = useRef(0);
+  const REVIVE_MS = 10 * 60 * 1000; // 죽은 프록시 10분 뒤 자동 복귀
+
+  const proxyList = useMemo(
+    () => proxies.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean),
+    [proxies]
+  );
+  const proxyCount = proxyList.length;
+
+  function aliveProxies() {
+    const now = Date.now();
+    return proxyList.filter((p) => {
+      const t = deadRef.current.get(p);
+      return !t || t <= now; // 데드 기록 없거나 10분 지났으면 살아있음
+    });
+  }
+  function nextAlive() {
+    const alive = aliveProxies();
+    if (!alive.length) return null;
+    const p = alive[cursorRef.current % alive.length];
+    cursorRef.current = cursorRef.current + 1;
+    return p;
+  }
+  function markDead(line) {
+    if (line) deadRef.current.set(line, Date.now() + REVIVE_MS);
+    setAliveCount(aliveProxies().length);
+  }
+
+  // 프록시 목록 바뀌면 데드 기록 초기화 + 살아있음 카운트 갱신
+  useEffect(() => {
+    deadRef.current = new Map();
+    cursorRef.current = 0;
+    setAliveCount(proxyList.length);
+  }, [proxies]); // eslint-disable-line react-hooks/exhaustive-deps
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [copied, setCopied] = useState(false);
@@ -77,7 +115,7 @@ export default function Home() {
 
   const list = useMemo(() => parseInput(keywords, globalMid), [keywords, globalMid]);
 
-  async function checkOne(it, { debug = false } = {}) {
+  async function checkOne(it, { debug = false, proxyLine = "" } = {}) {
     try {
       const res = await fetch("/api/check", {
         method: "POST",
@@ -88,6 +126,7 @@ export default function Home() {
           cut: Number(cut) || 4,
           adExclude,
           cookie,
+          proxies: proxyLine, // 클라이언트가 고른 1개만 전달
           debug,
         }),
       });
@@ -99,6 +138,27 @@ export default function Home() {
     }
   }
 
+  // 프록시 풀에서 살아있는 것들로 순차 시도, 실패한 건 10분 데드 처리
+  async function fetchKeyword(it, { debug = false } = {}) {
+    if (!proxyList.length) return await checkOne(it, { debug }); // 프록시 없으면 그냥
+    const tried = new Set();
+    let last = null;
+    const limit = Math.max(aliveProxies().length, 1);
+    for (let k = 0; k < limit; k++) {
+      const p = nextAlive();
+      if (!p || tried.has(p)) break;
+      tried.add(p);
+      const r = await checkOne(it, { debug, proxyLine: p });
+      last = r;
+      if (!r.blocked && !r.error) {
+        setAliveCount(aliveProxies().length);
+        return r; // 성공 -> 이 프록시 살려둠
+      }
+      markDead(p); // 실패 -> 10분 데드, 다음 살아있는 프록시로
+    }
+    return last || { keyword: it.keyword, error: "살아있는 프록시 없음", _mid: it.mid };
+  }
+
   async function run() {
     if (running) return;
     const items = parseInput(keywords, globalMid);
@@ -107,13 +167,15 @@ export default function Home() {
     stopRef.current = false;
     setRows([]);
     setProgress({ done: 0, total: items.length });
+    setAliveCount(aliveProxies().length);
+    const gap = Math.max(0, Number(interval) || 0) * 1000;
 
     for (let i = 0; i < items.length; i++) {
       if (stopRef.current) break;
-      const r = await checkOne(items[i]);
+      const r = await fetchKeyword(items[i]);
       setRows((prev) => [...prev, r]);
       setProgress({ done: i + 1, total: items.length });
-      await new Promise((res) => setTimeout(res, 350)); // 차단 회피용 간격
+      await new Promise((res) => setTimeout(res, gap));
     }
     setRunning(false);
   }
@@ -123,7 +185,7 @@ export default function Home() {
     const r0 = rows[i];
     if (!r0) return;
     setRows((prev) => prev.map((x, idx) => (idx === i ? { ...x, _retrying: true } : x)));
-    const r = await checkOne({ keyword: r0.keyword, mid: r0._mid });
+    const r = await fetchKeyword({ keyword: r0.keyword, mid: r0._mid });
     setRows((prev) => prev.map((x, idx) => (idx === i ? r : x)));
   }
 
@@ -131,7 +193,7 @@ export default function Home() {
   async function downloadRawHtml() {
     const kw = (prompt("원본 HTML 받을 키워드 1개 (블록 뜨는 거 추천):", list[0]?.keyword || "") || "").trim();
     if (!kw) return;
-    const r = await checkOne({ keyword: kw, mid: "" }, { debug: true });
+    const r = await fetchKeyword({ keyword: kw, mid: "" }, { debug: true });
     if (!r.htmlSample) {
       alert("HTML을 못 받았다: " + (r.error || "응답 없음"));
       return;
@@ -206,9 +268,30 @@ export default function Home() {
           광고 제외하고 순위 계산
         </label>
 
+        <label>
+          요청 간격(초)
+          <input type="number" min={0} max={10} step={0.5} value={interval} onChange={(e) => setIntervalMs(e.target.value)} />
+        </label>
+
         <label className="full">
           네이버 쿠키 (선택 · 차단 잦으면 로그인 세션 쿠키 붙여넣기)
           <input value={cookie} onChange={(e) => setCookie(e.target.value)} placeholder="NID_AUT=...; NID_SES=..." />
+        </label>
+
+        <label className="full">
+          프록시 (선택 · 한 줄에 하나, 요청마다 로테이션 / 죽으면 10분 뒤 자동 복귀){" "}
+          {proxyCount > 0 && (
+            <b style={{ color: "#03c75a" }}>
+              {proxyCount}개 · 살아있음 {aliveCount}
+              {proxyCount - aliveCount > 0 ? ` · 데드 ${proxyCount - aliveCount}` : ""}
+            </b>
+          )}
+          <textarea
+            rows={4}
+            value={proxies}
+            onChange={(e) => setProxies(e.target.value)}
+            placeholder={"호스트:포트:아이디:비번  (Webshare 형식)\n198.23.239.134:6540:user:pass\n107.172.163.27:6543:user:pass"}
+          />
         </label>
       </div>
 
@@ -307,7 +390,10 @@ export default function Home() {
                 </td>
                 <td>{r.myItem?.mall || <span className="dash">—</span>}</td>
                 <td>{r.blocked ? "—" : `${r.cardCount ?? "—"}/${r.adCount ?? "—"}`}</td>
-                <td className="st">{r.error ? r.error : `${r.status}·${Math.round((r.htmlLen || 0) / 1024)}KB`}</td>
+                <td className="st">
+                  {r.error ? r.error : `${r.status}·${Math.round((r.htmlLen || 0) / 1024)}KB`}
+                  {r.usedProxy && !r.error ? ` · ${r.usedProxy}` : ""}
+                </td>
                 <td>
                   <button className="rt" onClick={() => retry(i)} disabled={r._retrying}>
                     {r._retrying ? "…" : "재시도"}
