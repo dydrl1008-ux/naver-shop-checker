@@ -2,42 +2,74 @@
 
 import { useMemo, useRef, useState } from "react";
 
-function parseLines(text, globalMid) {
-  return text.split("\n").map((l) => l.trim()).filter(Boolean)
-    .map((line) => {
-      const parts = line.split(/[\t,]/).map((s) => s.trim());
-      return { keyword: parts[0], mid: parts[1] || globalMid || "" };
-    }).filter((x) => x.keyword);
+// 콤마 / 줄바꿈 / 탭 모두 키워드 구분자
+function parseKeywords(text, mid) {
+  const seen = new Set();
+  return text.split(/[\n,\t]/).map((s) => s.trim()).filter(Boolean)
+    .filter((k) => (seen.has(k) ? false : (seen.add(k), true)))
+    .map((keyword) => ({ keyword, mid: mid || "" }));
+}
+
+// 복사: clipboard API 실패 시 execCommand fallback
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch (e) {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-9999px";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return ok;
+  } catch (e) { return false; }
 }
 
 export default function Home() {
   const [keywords, setKeywords] = useState("");
   const [globalMid, setGlobalMid] = useState("");
   const [cut, setCut] = useState(4);
-  const [source, setSource] = useState("pc");
+  const [source, setSource] = useState("mobile");
   const [cookie, setCookie] = useState("");
   const [proxy, setProxy] = useState("");
   const [rows, setRows] = useState([]);
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
+  const [copied, setCopied] = useState("");
   const stopRef = useRef(false);
 
-  const jobs = useMemo(() => parseLines(keywords, globalMid), [keywords, globalMid]);
+  const jobs = useMemo(() => parseKeywords(keywords, globalMid), [keywords, globalMid]);
   const stats = useMemo(() => {
     const done = rows.filter((r) => r && !r.pending && !r.error);
-    const block = done.filter((r) => r.blockFound).length;
+    const block = done.filter((r) => !r.blocked && r.blockFound).length;
     const blocked = done.filter((r) => r.blocked).length;
-    const tracked = done.filter((r) => r.targetMid).length;
     const within = done.filter((r) => r.targetMid && r.myWithinCut).length;
-    return { total: rows.length, block, blocked, tracked, within };
+    return { total: rows.length, block, blocked, within };
   }, [rows]);
+
+  // 마지막에 복사할 두 리스트
+  const blockList = useMemo(
+    () => rows.filter((r) => r && !r.pending && !r.error && !r.blocked && r.blockFound).map((r) => r.keyword).join(","),
+    [rows]
+  );
+  const productList = useMemo(
+    () => rows.filter((r) => r && !r.pending && !r.error && !r.blocked && (r.myInBlock || r.myOnPage)).map((r) => r.keyword).join(","),
+    [rows]
+  );
 
   async function run() {
     if (running) return;
-    const list = parseLines(keywords, globalMid);
+    const list = parseKeywords(keywords, globalMid);
     if (!list.length) return;
     stopRef.current = false;
     setRunning(true);
+    setCopied("");
     setRows(list.map((j) => ({ keyword: j.keyword, targetMid: j.mid || null, pending: true })));
     setProgress({ done: 0, total: list.length });
     for (let i = 0; i < list.length; i++) {
@@ -59,11 +91,18 @@ export default function Home() {
       }
       setRows((prev) => { const n = [...prev]; n[i] = result; return n; });
       setProgress({ done: i + 1, total: list.length });
-      await new Promise((r) => setTimeout(r, 350)); // 통검은 텀 넉넉히 (차단 완화)
+      await new Promise((r) => setTimeout(r, 350));
     }
     setRunning(false);
   }
   function stop() { stopRef.current = true; setRunning(false); }
+
+  async function doCopy(text, key) {
+    if (!text) return;
+    const ok = await copyText(text);
+    setCopied(ok ? key : key + "-fail");
+    setTimeout(() => setCopied(""), 1600);
+  }
 
   function downloadCsv() {
     const header = ["키워드","가격비교블록","내nvMid","블록내위치",`${cut}등이내`,"페이지내존재","상태","httpStatus","htmlLen"];
@@ -98,22 +137,22 @@ export default function Home() {
 
       <section className="panel">
         <div className="field" style={{ display: "flex", flexDirection: "column" }}>
-          <label>키워드 (한 줄에 하나)</label>
+          <label>키워드 (콤마 또는 줄바꿈으로 구분)</label>
           <textarea value={keywords} onChange={(e) => setKeywords(e.target.value)}
-            placeholder={"복숭아\n캠핑의자, 82640123456\n핸드크림"} spellCheck={false} />
-          <div className="hint"><code>키워드, nvMid</code> 형식이면 그 줄만 따로 추적. 없으면 우측 공통 nvMid 사용.</div>
+            placeholder={"복숭아,캠핑의자,핸드크림\n또는 한 줄에 하나씩"} spellCheck={false} />
+          <div className="hint"><code>키워드1,키워드2</code> 콤마로 쭉 넣어도 되고 줄바꿈도 됨. 중복은 자동 제거.</div>
         </div>
         <div className="side">
           <div className="field">
-            <label>공통 nvMid (선택)</label>
+            <label>내 상품 nvMid (선택)</label>
             <input value={globalMid} onChange={(e) => setGlobalMid(e.target.value)} placeholder="예: 82640123456" inputMode="numeric" />
           </div>
           <div className="row2">
             <div className="field">
               <label>소스</label>
               <select value={source} onChange={(e) => setSource(e.target.value)}>
-                <option value="pc">통검 PC</option>
                 <option value="mobile">통검 모바일</option>
+                <option value="pc">통검 PC</option>
               </select>
             </div>
             <div className="field">
@@ -135,13 +174,12 @@ export default function Home() {
         <div className="field">
           <label>네이버 세션 쿠키 (로그인용, 선택)</label>
           <textarea className="cookie" value={cookie} onChange={(e) => setCookie(e.target.value)}
-            placeholder="로그인된 브라우저 → 개발자도구 → Network → search.naver 요청 → Request Headers의 Cookie 값 통째로 붙여넣기" spellCheck={false} />
-          <div className="hint">비번 자동화 대신 쿠키 재사용. 블록/순위 확인은 로그아웃으로도 되니 비워둬도 됨.</div>
+            placeholder="필요 시 로그인된 브라우저의 Cookie 값. 블록 확인은 로그아웃으로도 되니 비워둬도 됨." spellCheck={false} />
         </div>
         <div className="field">
           <label>프록시 URL (선택)</label>
           <input value={proxy} onChange={(e) => setProxy(e.target.value)} placeholder="http://user:pass@host:port" />
-          <div className="hint">Vercel 기본 IP가 막히면 프록시 경유. 막히면 상시 서버 권장.</div>
+          <div className="hint">Vercel IP가 막힐 때만. 안 막히면 비워두면 됨.</div>
         </div>
       </section>
 
@@ -150,9 +188,7 @@ export default function Home() {
           <div className="summary">
             <span className="chip">키워드 <b>{stats.total}</b></span>
             <span className="chip green">가격비교 블록 <b>{stats.block}</b></span>
-            {stats.tracked > 0 && (<>
-              <span className="chip green">{cut}등 이내 <b>{stats.within}</b></span>
-            </>)}
+            {stats.within > 0 && <span className="chip green">{cut}등 이내 <b>{stats.within}</b></span>}
             {stats.blocked > 0 && <span className="chip red">차단 <b>{stats.blocked}</b></span>}
             <span className="spacer" />
             <button className="csv" onClick={downloadCsv} disabled={!hasResults}>CSV 다운로드</button>
@@ -205,11 +241,37 @@ export default function Home() {
         </table>
       </div>
 
+      {hasResults && (
+        <div className="extract">
+          <div className="box">
+            <div className="top">
+              <span className="lbl">가격비교 블록 뜬 키워드 <b>{blockList ? blockList.split(",").length : 0}</b></span>
+              <button className={`copy ${copied === "block" ? "done" : copied === "block-fail" ? "fail" : ""}`}
+                onClick={() => doCopy(blockList, "block")} disabled={!blockList}>
+                {copied === "block" ? "복사됨!" : copied === "block-fail" ? "복사 실패—직접선택" : "복사"}
+              </button>
+            </div>
+            <textarea readOnly value={blockList} onFocus={(e) => e.target.select()}
+              placeholder="블록 O 키워드가 여기 모임" />
+          </div>
+          <div className="box">
+            <div className="top">
+              <span className="lbl">내 상품 있는 키워드 <b>{productList ? productList.split(",").length : 0}</b></span>
+              <button className={`copy ${copied === "prod" ? "done" : copied === "prod-fail" ? "fail" : ""}`}
+                onClick={() => doCopy(productList, "prod")} disabled={!productList}>
+                {copied === "prod" ? "복사됨!" : copied === "prod-fail" ? "복사 실패—직접선택" : "복사"}
+              </button>
+            </div>
+            <textarea readOnly value={productList} onFocus={(e) => e.target.select()}
+              placeholder="nvMid 넣고 돌리면 내 상품 뜬 키워드가 여기 모임" />
+          </div>
+        </div>
+      )}
+
       <p className="foot">
-        · <b>가격비교 블록</b> = 통검 HTML에 "네이버 가격비교" 블록 마크업이 실제로 있는지 직접 확인(추정 아님).<br />
-        · <b>내 상품(블록내)</b> = 블록 영역에서 내 nvMid 등장 순서상 위치(best-effort). "페이지有"는 블록 밖이지만 페이지엔 있음.<br />
-        · <b>차단</b> 뜨면 네이버가 막은 것 → 로그인 쿠키 넣거나 프록시 경유, 그래도 막히면 상시 서버에서 실행. 디버그의 htmlLen이 비정상적으로 작으면 차단 신호.<br />
-        · HTML 구조는 네이버가 수시로 바꿈. 라이브에서 블록 탐지가 어긋나면 디버그(matchedSignals) 보고 시그널 보강 필요.
+        · <b>가격비교 블록</b> = 통검 HTML에 "네이버 가격비교" 블록이 실제로 있는지 직접 확인.<br />
+        · <b>복사 버튼</b>이 안 먹으면 빨갛게 "직접선택" 뜸 → 아래 텍스트박스 클릭하면 전체 선택되니 Ctrl+C로 복사.<br />
+        · <b>차단</b>(htmlLen 작음) 뜨면 쿠키/프록시 또는 상시 서버에서 실행.
       </p>
     </div>
   );

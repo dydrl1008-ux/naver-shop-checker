@@ -304,3 +304,34 @@ td.center { text-align: center; }
 .tag.warn { background: var(--amber-soft); color: var(--amber); }
 .dbg { font-family: var(--mono); font-size: 11px; color: var(--muted); }
 textarea.cookie { min-height: 64px; font-size: 11.5px; line-height: 1.5; }
+
+/* ---- 추출/복사 섹션 ---- */
+.extract {
+  margin-top: 18px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+@media (max-width: 760px) { .extract { grid-template-columns: 1fr; } }
+.extract .box {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 14px;
+}
+.extract .top {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 9px;
+}
+.extract .top .lbl { font-size: 12.5px; font-weight: 700; }
+.extract .top .lbl b { font-family: var(--mono); color: var(--naver-ink); margin-left: 5px; }
+.extract textarea {
+  width: 100%; min-height: 70px; resize: vertical;
+  font-family: var(--mono); font-size: 12px; line-height: 1.6;
+}
+button.copy {
+  background: var(--naver); color: #fff; border: none; border-radius: 7px;
+  padding: 7px 14px; font-size: 12.5px; font-weight: 700; cursor: pointer;
+}
+button.copy:hover { filter: brightness(1.05); }
+button.copy.done { background: var(--naver-ink); }
+button.copy.fail { background: var(--alert); }
