@@ -7,10 +7,15 @@
 //       텍스트 "네이버 가격비교"는 블록이 없는 페이지에도 JSON 데이터
 //       ("source":"네이버 가격비교") 로 박혀 있어서 오탐난다 -> 신호로 쓰지 않음.
 
-import { request } from "undici";
+import { request, getGlobalDispatcher, interceptors } from "undici";
 
 export const runtime = "nodejs";
 export const maxDuration = 30;
+
+// undici v6: request 옵션의 maxRedirections 미지원 -> redirect 인터셉터 사용
+const redirectDispatcher = getGlobalDispatcher().compose(
+  interceptors.redirect({ maxRedirections: 3 })
+);
 
 // 블록 자체가 비어 보일 만큼 HTML이 짧으면 차단(캡차) 의심
 const MIN_HTML_LEN = 50_000;
@@ -86,7 +91,11 @@ async function fetchSerp(keyword, cookie) {
     encodeURIComponent(keyword);
   const headers = browserHeaders();
   if (cookie) headers.cookie = cookie;
-  const res = await request(url, { method: "GET", headers, maxRedirections: 3 });
+  const res = await request(url, {
+    method: "GET",
+    headers,
+    dispatcher: redirectDispatcher,
+  });
   const html = await res.body.text();
   return { status: res.statusCode, html };
 }
