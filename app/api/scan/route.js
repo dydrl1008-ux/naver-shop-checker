@@ -1,10 +1,5 @@
 // app/api/scan/route.js
-// 네이버 통합검색(통검) 페이지를 직접 fetch 해서
-//  1) "네이버 가격비교" 블록이 실제 렌더되는지 (HTML 마크업 탐지)
-//  2) 내 nvMid가 그 블록/페이지에 있는지 + 블록 내 대략 위치
-//  3) 차단/캡차 여부
-// 로그인은 세션 쿠키(헤더)로 처리. 헤더는 실제 크롬 요청 기준으로 풀세팅.
-
+// 통검 페이지 직접 fetch → "네이버 가격비교" 블록 실제 렌더 여부 + nvMid 위치 + 차단 판정
 import { fetch as uFetch, ProxyAgent } from "undici";
 
 export const runtime = "nodejs";
@@ -12,9 +7,6 @@ export const maxDuration = 30;
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36";
-
-const BLOCK_SIGNALS = ["네이버 가격비교", "다른 사이트 더보기", "다른 사이트를 보시려면"];
-// 실제 차단 페이지에만 나오는 강한 시그널 (정상 SERP엔 없음)
 const BLOCK_DENY = ["/sorry/unauth", "비정상적인 검색이 감지"];
 
 function buildUrl(keyword, source) {
@@ -24,7 +16,6 @@ function buildUrl(keyword, source) {
   return `https://search.naver.com/search.naver?where=nexearch&sm=top_hty&fbm=1&ie=utf8&query=${q}`;
 }
 
-// 실제 크롬이 보내는 헤더 풀세팅 (차단 완화)
 function buildHeaders(source, cookie) {
   const h = {
     "User-Agent": UA,
@@ -34,16 +25,8 @@ function buildHeaders(source, cookie) {
     priority: "u=0, i",
     referer: source === "mobile" ? "https://m.naver.com/" : "https://www.naver.com/",
     "sec-ch-ua": '"Google Chrome";v="149", "Chromium";v="149", "Not)A;Brand";v="24"',
-    "sec-ch-ua-arch": '"x86"',
-    "sec-ch-ua-bitness": '"64"',
-    "sec-ch-ua-form-factors": '"Desktop"',
-    "sec-ch-ua-full-version-list":
-      '"Google Chrome";v="149.0.7827.200", "Chromium";v="149.0.7827.200", "Not)A;Brand";v="24.0.0.0"',
     "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-model": '""',
     "sec-ch-ua-platform": '"Windows"',
-    "sec-ch-ua-platform-version": '"19.0.0"',
-    "sec-ch-ua-wow64": "?0",
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": source === "mobile" ? "same-site" : "same-origin",
@@ -54,11 +37,26 @@ function buildHeaders(source, cookie) {
   return h;
 }
 
-function sliceBlock(html) {
-  const i = html.indexOf("네이버 가격비교");
-  if (i < 0) return null;
-  return html.slice(Math.max(0, i - 2000), Math.min(html.length, i + 30000));
+// 진짜 가격비교 블록 판정:
+//  "네이버 가격비교" 제목 바로 뒤(900자 이내)에 "다른 사이트" CTA가 붙어있어야 인정.
+//  (스크립트/링크에 박힌 단독 문자열은 오탐이라 제외)
+function detectBlock(html) {
+  const TITLE = "네이버 가격비교";
+  let idx = html.indexOf(TITLE);
+  let titleHits = 0, at = -1, cta = false, tab = false;
+  while (idx !== -1) {
+    titleHits++;
+    if (at === -1) {
+      const win = html.slice(idx, idx + 3000);          // 제목 뒤 3000자
+      const c = win.includes("다른 사이트");             // CTA
+      const t = win.includes("키워드추천");              // 이 블록에만 있는 탭
+      if (c || t) { at = idx; cta = c; tab = t; }
+    }
+    idx = html.indexOf(TITLE, idx + 1);
+  }
+  return { found: at !== -1, at, titleHits, cta, tab };
 }
+
 function extractIds(region) {
   const ids = [];
   const seen = new Set();
@@ -99,8 +97,7 @@ export async function POST(req) {
     const htmlLen = html.length;
 
     const denyHit = BLOCK_DENY.filter((s) => html.includes(s));
-    // 정상 통검 SERP는 보통 200KB+ . 차단/캡차/sorry 페이지는 수십KB 이하.
-    const looksBlocked = status === 302 || status === 429 || htmlLen < 50000 || denyHit.length > 0;
+    const looksBlocked = status === 302 || status === 429 || htmlLen < 15000 || denyHit.length > 0;
     if (looksBlocked) {
       return Response.json({
         keyword, source, status, htmlLen, blocked: true,
@@ -108,28 +105,35 @@ export async function POST(req) {
           status === 302 ? "리다이렉트(차단 의심)" :
           status === 429 ? "요청 과다(429)" :
           denyHit.length ? `차단 시그널: ${denyHit.join(", ")}` :
-          "응답 비정상(HTML 너무 짧음 <50KB)",
-        note: cookie ? "쿠키 넣어도 막힘 → 프록시/상시서버 권장" : "쿠키 없이 막힘 → 로그인 쿠키 또는 프록시 시도",
+          "응답 비정상(HTML <15KB)",
+        note: cookie ? "쿠키 넣어도 막힘 → 프록시/상시서버" : "쿠키 없이 막힘 → 쿠키/프록시 시도",
       });
     }
 
-    const matched = BLOCK_SIGNALS.filter((s) => html.includes(s));
-    const blockFound = matched.includes("네이버 가격비교");
+    // 블록 판정 (제목 + CTA/키워드추천 근접)
+    const det = detectBlock(html);
+    const blockFound = det.found;
+    const matchedSignals = [];
+    if (det.titleHits) matchedSignals.push(`제목x${det.titleHits}`);
+    if (det.cta) matchedSignals.push("CTA");
+    if (det.tab) matchedSignals.push("키워드추천");
+    if (det.titleHits && !blockFound) matchedSignals.push("근접X");
 
+    // nvMid 위치
     let myInBlock = false, myPosInBlock = null, myOnPage = false;
     if (targetMid) {
       myOnPage = html.includes(targetMid);
-      const region = sliceBlock(html);
-      if (region) {
-        const idx = extractIds(region).indexOf(targetMid);
-        if (idx >= 0) { myInBlock = true; myPosInBlock = idx + 1; }
+      if (det.at >= 0) {
+        const region = html.slice(Math.max(0, det.at - 1000), det.at + 30000);
+        const i = extractIds(region).indexOf(targetMid);
+        if (i >= 0) { myInBlock = true; myPosInBlock = i + 1; }
       }
     }
     const myWithinCut = myPosInBlock !== null && myPosInBlock <= cut;
 
     return Response.json({
       keyword, source, status, htmlLen, blocked: false,
-      blockFound, matchedSignals: matched,
+      blockFound, matchedSignals, titleHits: det.titleHits,
       myOnPage, myInBlock, myPosInBlock, myWithinCut, cut,
     });
   } catch (e) {

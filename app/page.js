@@ -40,6 +40,28 @@ export default function Home() {
 
   const list = useMemo(() => parseInput(keywords, globalMid), [keywords, globalMid]);
 
+  async function checkOne(it, { debug = false } = {}) {
+    try {
+      const res = await fetch("/api/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          keyword: it.keyword,
+          targetMid: it.mid,
+          cut: Number(cut) || 4,
+          adExclude,
+          cookie,
+          debug,
+        }),
+      });
+      const r = await res.json();
+      r._mid = it.mid;
+      return r;
+    } catch (e) {
+      return { keyword: it.keyword, error: e.message, _mid: it.mid };
+    }
+  }
+
   async function run() {
     if (running) return;
     const items = parseInput(keywords, globalMid);
@@ -51,30 +73,37 @@ export default function Home() {
 
     for (let i = 0; i < items.length; i++) {
       if (stopRef.current) break;
-      const it = items[i];
-      let r;
-      try {
-        const res = await fetch("/api/check", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            keyword: it.keyword,
-            targetMid: it.mid,
-            cut: Number(cut) || 4,
-            adExclude,
-            cookie,
-          }),
-        });
-        r = await res.json();
-      } catch (e) {
-        r = { keyword: it.keyword, error: e.message };
-      }
-      r._mid = it.mid;
+      const r = await checkOne(items[i]);
       setRows((prev) => [...prev, r]);
       setProgress({ done: i + 1, total: items.length });
       await new Promise((res) => setTimeout(res, 350)); // 차단 회피용 간격
     }
     setRunning(false);
+  }
+
+  // 특정 줄만 다시 실행 (차단/실패 재시도)
+  async function retry(i) {
+    const r0 = rows[i];
+    if (!r0) return;
+    setRows((prev) => prev.map((x, idx) => (idx === i ? { ...x, _retrying: true } : x)));
+    const r = await checkOne({ keyword: r0.keyword, mid: r0._mid });
+    setRows((prev) => prev.map((x, idx) => (idx === i ? r : x)));
+  }
+
+  // 서버가 실제로 받는 raw HTML 받아오기 (블록 판별 기준 잡기용)
+  async function downloadRawHtml() {
+    const kw = (prompt("원본 HTML 받을 키워드 1개 (블록 뜨는 거 추천):", list[0]?.keyword || "") || "").trim();
+    if (!kw) return;
+    const r = await checkOne({ keyword: kw, mid: "" }, { debug: true });
+    if (!r.htmlSample) {
+      alert("HTML을 못 받았다: " + (r.error || "응답 없음"));
+      return;
+    }
+    const blob = new Blob([r.htmlSample], { type: "text/html;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `raw_${kw}_${r.htmlLen}.html`;
+    a.click();
   }
 
   function stop() {
@@ -159,6 +188,9 @@ export default function Home() {
         <button onClick={downloadCsv} disabled={!rows.length}>
           CSV 다운로드
         </button>
+        <button onClick={downloadRawHtml} title="서버가 실제로 받는 raw HTML 저장 (블록 판별 기준 잡기용)">
+          원본 HTML 받기
+        </button>
         {progress.total > 0 && (
           <span className="prog">
             {progress.done} / {progress.total}
@@ -177,6 +209,7 @@ export default function Home() {
               <th>매칭몰</th>
               <th>카드/광고</th>
               <th>상태</th>
+              <th></th>
             </tr>
           </thead>
           <tbody>
@@ -218,6 +251,11 @@ export default function Home() {
                 <td>{r.myItem?.mall || <span className="dash">—</span>}</td>
                 <td>{r.blocked ? "—" : `${r.cardCount ?? "—"}/${r.adCount ?? "—"}`}</td>
                 <td className="st">{r.error ? r.error : `${r.status}·${Math.round((r.htmlLen || 0) / 1024)}KB`}</td>
+                <td>
+                  <button className="rt" onClick={() => retry(i)} disabled={r._retrying}>
+                    {r._retrying ? "…" : "재시도"}
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>

@@ -105,6 +105,7 @@ export async function POST(req) {
     const body = await req.json();
     const keyword = (body.keyword || "").trim();
     const targetMid = (body.targetMid || "").toString().trim();
+    const debug = body.debug === true;
     let cut = parseInt(body.cut, 10) || 4;             // 노출 인정 등수 (기본 4)
     cut = Math.min(Math.max(cut, 1), 50);
     const adExclude = body.adExclude !== false;        // 기본 true: 광고 제외하고 순위
@@ -126,8 +127,17 @@ export async function POST(req) {
         keyword, status, htmlLen: html.length,
         blocked: true,
         error: `차단 의심 (status ${status}, ${Math.round(html.length / 1024)}KB). 쿠키 붙이거나 잠시 후 재시도.`,
+        ...(debug ? { htmlSample: html } : {}),
       });
     }
+
+    // 진단용: raw HTML에 어떤 후보 신호가 있는지 (블록 판별은 shp_tli로만)
+    const signals = {
+      shpTli: html.includes('data-slog-container="shp_tli"'),
+      textPriceCompare: html.includes("네이버 가격비교"),
+      otherSiteLink: html.includes("다른 사이트"),
+      shoppingApi: /cr\d?\.shopping\.naver\.com|msearch\.shopping\.naver\.com/.test(html),
+    };
 
     // ★ 블록 판별: shp_tli 컨테이너 존재 여부 (텍스트 매칭 X)
     const blockHtml = sliceBlock(html);
@@ -168,6 +178,8 @@ export async function POST(req) {
       myOrganicRank,
       myWithinCut,
       myItem,
+      signals,
+      ...(debug ? { htmlSample: html } : {}),
     });
   } catch (e) {
     return Response.json({ error: e?.message || "알 수 없는 오류" }, { status: 500 });
