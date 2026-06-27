@@ -34,7 +34,8 @@ export default function Home() {
   const [adExclude, setAdExclude] = useState(true);
   const [cookie, setCookie] = useState("");
   const [proxies, setProxies] = useState("");
-  const [interval, setIntervalMs] = useState(0.35);
+  const [interval, setIntervalMs] = useState(0);
+  const [concurrency, setConcurrency] = useState(5);
   const [aliveCount, setAliveCount] = useState(0);
   const [rows, setRows] = useState([]);
   const deadRef = useRef(new Map()); // proxyLine -> 복귀시각(ts)
@@ -165,18 +166,33 @@ export default function Home() {
     if (!items.length) return;
     setRunning(true);
     stopRef.current = false;
-    setRows([]);
     setProgress({ done: 0, total: items.length });
     setAliveCount(aliveProxies().length);
     const gap = Math.max(0, Number(interval) || 0) * 1000;
 
-    for (let i = 0; i < items.length; i++) {
-      if (stopRef.current) break;
-      const r = await fetchKeyword(items[i]);
-      setRows((prev) => [...prev, r]);
-      setProgress({ done: i + 1, total: items.length });
-      await new Promise((res) => setTimeout(res, gap));
-    }
+    // 결과를 인덱스 순서로 유지 (병렬이라 끝나는 순서가 뒤섞임)
+    const results = items.map((it) => ({ keyword: it.keyword, _mid: it.mid, _pending: true }));
+    setRows(results.slice());
+
+    // 동시 실행 수: 프록시 있으면 살아있는 프록시 수 넘지 않게 (한 프록시 동시타격 방지)
+    let n = Math.max(1, Math.min(Number(concurrency) || 1, 20));
+    if (proxyList.length) n = Math.min(n, Math.max(aliveProxies().length, 1));
+
+    let next = 0;
+    let done = 0;
+    const worker = async () => {
+      while (!stopRef.current) {
+        const i = next++;
+        if (i >= items.length) return;
+        const r = await fetchKeyword(items[i]);
+        results[i] = r;
+        done++;
+        setRows(results.slice());
+        setProgress({ done, total: items.length });
+        if (gap) await new Promise((res) => setTimeout(res, gap));
+      }
+    };
+    await Promise.all(Array.from({ length: n }, () => worker()));
     setRunning(false);
   }
 
@@ -272,6 +288,10 @@ export default function Home() {
           요청 간격(초)
           <input type="number" min={0} max={10} step={0.5} value={interval} onChange={(e) => setIntervalMs(e.target.value)} />
         </label>
+        <label>
+          동시 실행 수
+          <input type="number" min={1} max={20} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} />
+        </label>
 
         <label className="full">
           네이버 쿠키 (선택 · 차단 잦으면 로그인 세션 쿠키 붙여넣기)
@@ -357,7 +377,9 @@ export default function Home() {
               <tr key={i}>
                 <td className="kw">{r.keyword}</td>
                 <td>
-                  {r.blocked ? (
+                  {r._pending || r._retrying ? (
+                    <span className="b off">…</span>
+                  ) : r.blocked ? (
                     <span className="b blk">차단</span>
                   ) : r.hasBlock ? (
                     <span className="b on">블록 O</span>
@@ -391,8 +413,8 @@ export default function Home() {
                 <td>{r.myItem?.mall || <span className="dash">—</span>}</td>
                 <td>{r.blocked ? "—" : `${r.cardCount ?? "—"}/${r.adCount ?? "—"}`}</td>
                 <td className="st">
-                  {r.error ? r.error : `${r.status}·${Math.round((r.htmlLen || 0) / 1024)}KB`}
-                  {r.usedProxy && !r.error ? ` · ${r.usedProxy}` : ""}
+                  {r._pending ? "진행중…" : r.error ? r.error : `${r.status}·${Math.round((r.htmlLen || 0) / 1024)}KB`}
+                  {r.usedProxy && !r.error && !r._pending ? ` · ${r.usedProxy}` : ""}
                 </td>
                 <td>
                   <button className="rt" onClick={() => retry(i)} disabled={r._retrying}>
