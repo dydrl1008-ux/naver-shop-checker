@@ -112,6 +112,7 @@ export default function Home() {
       const d = await res.json();
       if (d.proxies?.length) {
         setCollected(d.proxies);
+        savePool(d.proxies);
         deadRef.current = new Map();
         statsRef.current = new Map();
         cursorRef.current = 0;
@@ -135,7 +136,7 @@ export default function Home() {
     setCleanProg({ done: 0, total: pool.length, alive: 0 });
     const alive = [];
     let idx = 0, done = 0;
-    const PING_CONC = 80; // 핑은 가벼워서 동시 많이
+    const PING_CONC = 300; // 핑은 가벼워서 동시 최대로
     const worker = async () => {
       while (!stopRef.current) {
         const i = idx++;
@@ -145,13 +146,13 @@ export default function Home() {
           const res = await fetch("/api/check", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ping: true, proxies: p, timeoutMs: 2500 }),
+            body: JSON.stringify({ ping: true, proxies: p, timeoutMs: 1200 }),
           });
           const d = await res.json();
           if (d.alive) alive.push(p);
         } catch {}
         done++;
-        if (done % 25 === 0 || done === pool.length) {
+        if (done % 50 === 0 || done === pool.length) {
           setCleanProg({ done, total: pool.length, alive: alive.length });
         }
       }
@@ -159,6 +160,7 @@ export default function Home() {
     await Promise.all(Array.from({ length: PING_CONC }, () => worker()));
     // 살아있는 것만 남기기
     setCollected(alive);
+    savePool(alive);
     setProxies(""); // 수동 입력분도 청소 결과로 흡수
     deadRef.current = new Map();
     cursorRef.current = 0;
@@ -193,6 +195,38 @@ export default function Home() {
     cursorRef.current = 0;
     setAliveCount(proxyList.length);
   }, [proxies, collected]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 저장된 풀 불러오기 (새로고침/재접속해도 유지)
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("nsc_pool");
+      if (saved) {
+        const arr = JSON.parse(saved);
+        if (Array.isArray(arr) && arr.length) {
+          setCollected(arr);
+          setAliveCount(arr.length);
+        }
+      }
+    } catch {}
+  }, []);
+
+  function savePool(arr) {
+    try { localStorage.setItem("nsc_pool", JSON.stringify(arr)); } catch {}
+  }
+
+  // 현재 살아있는 프록시 복사 (다른 사람한테 공유용)
+  async function copyPool() {
+    const text = aliveProxies().join("\n");
+    if (!text) { alert("복사할 프록시가 없다."); return; }
+    try { await navigator.clipboard.writeText(text); alert(`살아있는 프록시 ${aliveProxies().length}개 복사됨`); }
+    catch {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); alert("복사됨"); } catch { alert("복사 실패"); }
+      document.body.removeChild(ta);
+    }
+  }
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [copied, setCopied] = useState(false);
@@ -309,11 +343,11 @@ export default function Home() {
     setRows(results.slice());
 
     // 경쟁발사: 워커당 fire개 동시 발사하므로 총 동시요청 = n * fire.
-    // 총합이 ~50 넘지 않게 워커 수 자동 조정.
+    // 풀이 크면 총합 200까지 허용 (브라우저 동시연결 한계 근처).
     const fire = fastMode ? Math.max(1, Math.min(Number(racingN) || 5, 10)) : 1;
-    const maxN = fastMode ? 40 : 20;
+    const maxN = fastMode ? 100 : 30;
     let n = Math.max(1, Math.min(Number(concurrency) || 1, maxN));
-    if (fire > 1) n = Math.max(1, Math.min(n, Math.floor(50 / fire)));
+    if (fire > 1) n = Math.max(1, Math.min(n, Math.floor(200 / fire)));
     if (proxyList.length) n = Math.min(n, proxyList.length);
 
     let next = 0;
@@ -443,7 +477,7 @@ export default function Home() {
         </label>
         <label>
           동시 실행 수
-          <input type="number" min={1} max={20} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} />
+          <input type="number" min={1} max={100} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} />
         </label>
 
         <label className="full">
@@ -468,6 +502,9 @@ export default function Home() {
               </button>
               <button type="button" className="clean" onClick={cleanProxies} disabled={cleaning || collecting || !proxyCount}>
                 {cleaning ? `청소 ${cleanProg.done}/${cleanProg.total}` : "프록시 청소"}
+              </button>
+              <button type="button" className="clean" onClick={copyPool} disabled={!proxyCount}>
+                살아있는거 복사
               </button>
               복귀(분)
               <input

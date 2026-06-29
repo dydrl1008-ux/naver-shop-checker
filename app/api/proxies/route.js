@@ -14,9 +14,22 @@ const SOURCES = [
   "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt",
   "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt",
   "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt",
+  "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/https.txt",
+  "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt",
+  "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt",
+  "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt",
+  "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt",
+  "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/https.txt",
+  "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt",
+  "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/https/data.txt",
+  "https://raw.githubusercontent.com/yuceltoluyag/GoodProxy/main/raw.txt",
+  "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt",
   "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text",
+  "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=https&proxy_format=ipport&format=text",
   "https://www.proxy-list.download/api/v1/get?type=http",
   "https://www.proxy-list.download/api/v1/get?type=https",
+  "https://proxyspace.pro/http.txt",
+  "https://proxyspace.pro/https.txt",
 ];
 
 const IPPORT = /(?:^|[^\d])(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d{2,5})/g;
@@ -61,7 +74,7 @@ export async function POST() {
       total: proxies.length,
       sources: SOURCES.length,
       perSource: counts,
-      proxies: proxies.slice(0, 8000), // 너무 크면 자름
+      proxies: proxies.slice(0, 20000), // 너무 크면 자름
     });
   } catch (e) {
     return Response.json({ error: e?.message || "수집 실패" }, { status: 500 });
