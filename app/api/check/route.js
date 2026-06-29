@@ -257,6 +257,33 @@ export async function POST(req) {
       return Response.json({ alive });
     }
 
+    // IP 테스트 모드: 게이트웨이로 실제 나가는 exit IP를 확인 (로테이션 검증)
+    if (body.iptest === true) {
+      const one = proxies[0];
+      if (!one) return Response.json({ ips: [], error: "프록시 없음" });
+      const ips = [];
+      for (let k = 0; k < 5; k++) {
+        let agent = null;
+        try {
+          agent = new ProxyAgent({
+            uri: one, headersTimeout: 8000, bodyTimeout: 8000,
+            pipelining: 0, keepAliveTimeout: 1, keepAliveMaxTimeout: 1,
+          });
+          const res = await request("https://api.ipify.org/", {
+            method: "GET", dispatcher: agent, headers: { "connection": "close" },
+          });
+          const ip = (await res.body.text()).trim();
+          ips.push(ip);
+        } catch (e) {
+          ips.push("실패(" + (e?.code || e?.message || "?") + ")");
+        } finally {
+          if (agent) { try { await agent.close(); } catch {} }
+        }
+      }
+      const uniq = [...new Set(ips)].length;
+      return Response.json({ ips, unique: uniq });
+    }
+
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
     let attempt;

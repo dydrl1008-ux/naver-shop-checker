@@ -85,6 +85,30 @@ export default function Home() {
     setAliveCount(proxyList.length);
   }, [proxies]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // 게이트웨이 exit IP 로테이션 테스트 (앱 코드 경로로 실제 확인)
+  async function testProxyIP() {
+    const line = proxyList[0];
+    if (!line) { alert("프록시를 먼저 넣어라."); return; }
+    try {
+      const res = await fetch("/api/check", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ iptest: true, proxies: line }),
+      });
+      const d = await res.json();
+      if (d.ips) {
+        alert(
+          `앱이 실제로 나간 IP 5개:\n\n${d.ips.join("\n")}\n\n서로 다른 IP: ${d.unique}개` +
+          (d.unique >= 3 ? "\n\n→ 로테이션 정상. 차단은 IP풀/패턴 문제." : "\n\n→ IP 고정됨. 앱 로테이션 문제.")
+        );
+      } else {
+        alert("테스트 실패: " + (d.error || "?"));
+      }
+    } catch (e) {
+      alert("오류: " + e.message);
+    }
+  }
+
   // 현재 살아있는 프록시 복사 (팀 공유용)
   async function copyPool() {
     const text = aliveProxies().join("\n");
@@ -401,6 +425,9 @@ export default function Home() {
             <span className="prx-ctrl">
               <button type="button" className="clean" onClick={copyPool} disabled={!proxyCount}>
                 살아있는거 복사
+              </button>
+              <button type="button" className="clean" onClick={testProxyIP} disabled={!proxyCount}>
+                IP 로테이션 테스트
               </button>
               복귀(분)
               <input
