@@ -35,36 +35,26 @@ export default function Home() {
   const [cookie, setCookie] = useState("");
   const [proxies, setProxies] = useState("");
   const [interval, setIntervalMs] = useState(0);
-  const [concurrency, setConcurrency] = useState(5);
+  const [concurrency, setConcurrency] = useState(10);
   const [noLogin, setNoLogin] = useState(true);
-  const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 즉시 버림
-  const [racingN, setRacingN] = useState(5);       // 키워드당 동시 발사 프록시 수
-  const [cleaning, setCleaning] = useState(false);
-  const [cleanProg, setCleanProg] = useState({ done: 0, total: 0, alive: 0 });
+  const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 잠시 빼기
+  const [racingN, setRacingN] = useState(1);       // 키워드당 동시 발사 (가입형은 1=트래픽 절약, 차단 잦으면 ↑)
   const [aliveCount, setAliveCount] = useState(0);
-  const [collected, setCollected] = useState([]); // 자동 수집된 프록시
-  const [collecting, setCollecting] = useState(false);
-  const [reviveMin, setReviveMin] = useState(10); // 데드 후 복귀까지(분)
-  const [statsTick, setStatsTick] = useState(0);   // 통계 리렌더 트리거
+  const [reviveMin, setReviveMin] = useState(3);   // 데드 후 복귀까지(분)
   const [rows, setRows] = useState([]);
   const deadRef = useRef(new Map());  // proxyLine -> 복귀시각(ts)
-  const statsRef = useRef(new Map()); // proxyLine -> {deaths, lastDeadAt, reviveSum, reviveN, success}
   const cursorRef = useRef(0);
 
-  // 수동 입력 + 자동 수집 합친 풀 (중복 제거)
+  // 프록시 풀 (수동 입력)
   const proxyList = useMemo(() => {
-    const manual = proxies.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
     const seen = new Set();
-    return [...manual, ...collected].filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
-  }, [proxies, collected]);
+    return proxies.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean)
+      .filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
+  }, [proxies]);
   const proxyCount = proxyList.length;
-  const REVIVE_MS = Math.max(0.5, Number(reviveMin) || 10) * 60 * 1000;
+  const REVIVE_MS = Math.max(0.5, Number(reviveMin) || 3) * 60 * 1000;
 
-  function st(line) {
-    let s = statsRef.current.get(line);
-    if (!s) { s = { deaths: 0, lastDeadAt: 0, reviveSum: 0, reviveN: 0, success: 0 }; statsRef.current.set(line, s); }
-    return s;
-  }
+
   function aliveProxies() {
     const now = Date.now();
     return proxyList.filter((p) => {
@@ -79,134 +69,21 @@ export default function Home() {
     cursorRef.current = cursorRef.current + 1;
     return p;
   }
+  // 차단/실패한 프록시 잠시 빼두기 (복귀시간 지나면 자동 복귀)
   function markDead(line) {
     if (!line) return;
-    // 고속 모드: 부활 안 기다리고 사실상 영구 제외 (풀이 크니 새 거 쓰면 됨)
-    const reviveAt = fastMode ? Date.now() + 24 * 3600 * 1000 : Date.now() + REVIVE_MS;
-    deadRef.current.set(line, reviveAt);
-    const s = st(line);
-    s.deaths += 1;
-    s.lastDeadAt = Date.now();
+    deadRef.current.set(line, Date.now() + REVIVE_MS);
     setAliveCount(aliveProxies().length);
-    setStatsTick((x) => x + 1);
-  }
-  function markSuccess(line) {
-    if (!line) return;
-    const s = st(line);
-    s.success += 1;
-    // 죽었다 살아난 거면 부활시간 기록
-    if (s.lastDeadAt) {
-      s.reviveSum += Date.now() - s.lastDeadAt;
-      s.reviveN += 1;
-      s.lastDeadAt = 0;
-    }
-    setStatsTick((x) => x + 1);
   }
 
-  // 무료 프록시 자동 수집
-  async function collectProxies() {
-    if (collecting) return;
-    setCollecting(true);
-    try {
-      const res = await fetch("/api/proxies", { method: "POST" });
-      const d = await res.json();
-      if (d.proxies?.length) {
-        setCollected(d.proxies);
-        savePool(d.proxies);
-        deadRef.current = new Map();
-        statsRef.current = new Map();
-        cursorRef.current = 0;
-        alert(`프록시 ${d.total}개 수집됨 (소스 ${d.sources}개)`);
-      } else {
-        alert("수집 실패: " + (d.error || "0개"));
-      }
-    } catch (e) {
-      alert("수집 오류: " + e.message);
-    }
-    setCollecting(false);
-  }
-
-  // 사전 청소: 풀을 묶음으로 서버에 보내 서버가 일괄 핑 -> 살아있는 것만 회수
-  async function cleanProxies() {
-    if (cleaning) return;
-    const poolArr = proxyList.slice();
-    if (!poolArr.length) { alert("청소할 프록시가 없다. 먼저 수집해라."); return; }
-    setCleaning(true);
-    stopRef.current = false;
-    setCleanProg({ done: 0, total: poolArr.length, alive: 0 });
-
-    const CHUNK = 1500;       // 한 번에 서버로 보낼 개수
-    const alive = [];
-    for (let i = 0; i < poolArr.length; i += CHUNK) {
-      if (stopRef.current) break;
-      const chunk = poolArr.slice(i, i + CHUNK);
-      try {
-        const res = await fetch("/api/clean", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ proxies: chunk.join("\n"), timeoutMs: 1200, concurrency: 250 }),
-        });
-        const d = await res.json();
-        if (Array.isArray(d.alive)) alive.push(...d.alive);
-      } catch {}
-      setCleanProg({ done: Math.min(i + CHUNK, poolArr.length), total: poolArr.length, alive: alive.length });
-    }
-
-    setCollected(alive);
-    savePool(alive);
-    setProxies("");
-    deadRef.current = new Map();
-    cursorRef.current = 0;
-    setAliveCount(alive.length);
-    setCleaning(false);
-    alert(`청소 완료: ${poolArr.length}개 중 살아있는 ${alive.length}개만 남김`);
-  }
-
-  // 프록시 생애주기 요약
-  const lifeStats = useMemo(() => {
-    void statsTick;
-    let revivedN = 0, reviveSumAll = 0, totalDeaths = 0, totalSuccess = 0, everDead = 0;
-    statsRef.current.forEach((s) => {
-      totalDeaths += s.deaths;
-      totalSuccess += s.success;
-      if (s.deaths) everDead += 1;
-      if (s.reviveN) { revivedN += s.reviveN; reviveSumAll += s.reviveSum; }
-    });
-    return {
-      avgReviveMin: revivedN ? (reviveSumAll / revivedN / 60000).toFixed(1) : null,
-      revivedCount: revivedN,
-      everDead,
-      totalDeaths,
-      totalSuccess,
-    };
-  }, [statsTick]);
-
-  // 프록시 목록 바뀌면 데드/통계 초기화
+  // 프록시 목록 바뀌면 데드 초기화
   useEffect(() => {
     deadRef.current = new Map();
     cursorRef.current = 0;
     setAliveCount(proxyList.length);
-  }, [proxies, collected]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [proxies]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // 저장된 풀 불러오기 (새로고침/재접속해도 유지)
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem("nsc_pool");
-      if (saved) {
-        const arr = JSON.parse(saved);
-        if (Array.isArray(arr) && arr.length) {
-          setCollected(arr);
-          setAliveCount(arr.length);
-        }
-      }
-    } catch {}
-  }, []);
-
-  function savePool(arr) {
-    try { localStorage.setItem("nsc_pool", JSON.stringify(arr)); } catch {}
-  }
-
-  // 현재 살아있는 프록시 복사 (다른 사람한테 공유용)
+  // 현재 살아있는 프록시 복사 (팀 공유용)
   async function copyPool() {
     const text = aliveProxies().join("\n");
     if (!text) { alert("복사할 프록시가 없다."); return; }
@@ -275,7 +152,7 @@ export default function Home() {
           cookie,
           noLogin,
           proxies: proxyLine, // 클라이언트가 고른 1개만 전달
-          timeoutMs: fastMode ? 4000 : 9000,
+          timeoutMs: fastMode ? 7000 : 10000,
           debug,
         }),
       });
@@ -312,7 +189,7 @@ export default function Home() {
         else { markDead(p); }
         last = r;
       }
-      if (success) { markSuccess(success.p); return success.r; }
+      if (success) { return success.r; }
     }
     return last || { keyword: it.keyword, error: "프록시 다 실패", _mid: it.mid };
   }
@@ -454,11 +331,11 @@ export default function Home() {
         </label>
         <label className="chk">
           <input type="checkbox" checked={fastMode} onChange={(e) => setFastMode(e.target.checked)} />
-          고속 모드 (무료 풀용 · 타임아웃 4초 · 죽으면 즉시 버림)
+          고속 모드 (타임아웃 짧게 · 차단되면 다음 프록시로)
         </label>
         {fastMode && (
           <label>
-            키워드당 동시 발사
+            키워드당 동시 발사 (1=트래픽 절약 / ↑=차단 잦을 때)
             <input type="number" min={1} max={10} value={racingN} onChange={(e) => setRacingN(e.target.value)} />
           </label>
         )}
@@ -480,7 +357,7 @@ export default function Home() {
         <label className="full">
           <div className="prx-head">
             <span>
-              프록시 (수동 입력 + 자동 수집 / 죽으면 일정시간 뒤 자동 복귀){" "}
+              프록시 (가입형 무료 프록시 붙여넣기 / 차단되면 잠시 빼고 복귀){" "}
               {proxyCount > 0 && (
                 <b style={{ color: "#03c75a" }}>
                   {proxyCount}개 · 살아있음 {aliveCount}
@@ -489,12 +366,6 @@ export default function Home() {
               )}
             </span>
             <span className="prx-ctrl">
-              <button type="button" className="collect" onClick={collectProxies} disabled={collecting || cleaning}>
-                {collecting ? "수집 중…" : "무료 프록시 수집"}
-              </button>
-              <button type="button" className="clean" onClick={cleanProxies} disabled={cleaning || collecting || !proxyCount}>
-                {cleaning ? `청소 ${cleanProg.done}/${cleanProg.total}` : "프록시 청소"}
-              </button>
               <button type="button" className="clean" onClick={copyPool} disabled={!proxyCount}>
                 살아있는거 복사
               </button>
@@ -507,26 +378,13 @@ export default function Home() {
               />
             </span>
           </div>
-          {collected.length > 0 && <div className="prx-note">자동 수집 {collected.length}개 풀에 포함됨</div>}
           <textarea
-            rows={3}
+            rows={5}
             value={proxies}
             onChange={(e) => setProxies(e.target.value)}
-            placeholder={"수동으로 넣을 프록시 (host:port 또는 host:port:user:pass)\n비워두고 '무료 프록시 수집'만 눌러도 됨"}
+            placeholder={"가입형 프록시 한 줄에 하나 (host:port:user:pass 또는 host:port)\nProxyScrape 100개 + Webshare 10개 등 받아서 붙여넣기"}
           />
         </label>
-
-        {(lifeStats.everDead > 0 || lifeStats.totalSuccess > 0) && (
-          <div className="lifebox">
-            <b>프록시 생애주기</b>
-            <span>네이버 통과 성공 {lifeStats.totalSuccess}회</span>
-            <span>죽은 적 있는 프록시 {lifeStats.everDead}개 / 총 차단 {lifeStats.totalDeaths}회</span>
-            <span>
-              부활 관측 {lifeStats.revivedCount}회
-              {lifeStats.avgReviveMin ? ` · 평균 부활시간 ${lifeStats.avgReviveMin}분` : " · (아직 부활 관측 전)"}
-            </span>
-          </div>
-        )}
       </div>
 
       <div className="btns">
