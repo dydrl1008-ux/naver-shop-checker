@@ -37,6 +37,7 @@ export default function Home() {
   const [interval, setIntervalMs] = useState(0);
   const [concurrency, setConcurrency] = useState(5);
   const [noLogin, setNoLogin] = useState(true);
+  const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 즉시 버림
   const [aliveCount, setAliveCount] = useState(0);
   const [collected, setCollected] = useState([]); // 자동 수집된 프록시
   const [collecting, setCollecting] = useState(false);
@@ -77,7 +78,9 @@ export default function Home() {
   }
   function markDead(line) {
     if (!line) return;
-    deadRef.current.set(line, Date.now() + REVIVE_MS);
+    // 고속 모드: 부활 안 기다리고 사실상 영구 제외 (풀이 크니 새 거 쓰면 됨)
+    const reviveAt = fastMode ? Date.now() + 24 * 3600 * 1000 : Date.now() + REVIVE_MS;
+    deadRef.current.set(line, reviveAt);
     const s = st(line);
     s.deaths += 1;
     s.lastDeadAt = Date.now();
@@ -200,6 +203,7 @@ export default function Home() {
           cookie,
           noLogin,
           proxies: proxyLine, // 클라이언트가 고른 1개만 전달
+          timeoutMs: fastMode ? 4000 : 9000,
           debug,
         }),
       });
@@ -211,12 +215,14 @@ export default function Home() {
     }
   }
 
-  // 프록시 풀에서 살아있는 것들로 순차 시도, 실패한 건 10분 데드 처리
+  // 프록시 풀에서 살아있는 것들로 순차 시도, 실패한 건 데드 처리
   async function fetchKeyword(it, { debug = false } = {}) {
     if (!proxyList.length) return await checkOne(it, { debug }); // 프록시 없으면 그냥
     const tried = new Set();
     let last = null;
-    const limit = Math.max(aliveProxies().length, 1);
+    // 키워드당 시도 상한: 고속 12회 / 일반 6회 (한 키워드가 풀 다 태우는 거 방지)
+    const cap = fastMode ? 12 : 6;
+    const limit = Math.min(Math.max(aliveProxies().length, 1), cap);
     for (let k = 0; k < limit; k++) {
       const p = nextAlive();
       if (!p || tried.has(p)) break;
@@ -250,8 +256,9 @@ export default function Home() {
     const results = items.map((it) => ({ keyword: it.keyword, _mid: it.mid, _pending: true }));
     setRows(results.slice());
 
-    // 동시 실행 수: 프록시 있으면 프록시 개수 넘지 않게 (한 프록시 동시타격 방지)
-    let n = Math.max(1, Math.min(Number(concurrency) || 1, 20));
+    // 동시 실행 수: 고속 모드면 40까지, 아니면 20까지. 프록시 풀보단 작게.
+    const maxN = fastMode ? 40 : 20;
+    let n = Math.max(1, Math.min(Number(concurrency) || 1, maxN));
     if (proxyList.length) n = Math.min(n, proxyList.length);
 
     let next = 0;
@@ -363,6 +370,10 @@ export default function Home() {
         <label className="chk">
           <input type="checkbox" checked={noLogin} onChange={(e) => setNoLogin(e.target.checked)} />
           비로그인 모드 (쿠키 안 씀 · 세션 추적 회피)
+        </label>
+        <label className="chk">
+          <input type="checkbox" checked={fastMode} onChange={(e) => setFastMode(e.target.checked)} />
+          고속 모드 (무료 풀용 · 타임아웃 4초 · 죽으면 즉시 버림 · 동시 40까지)
         </label>
 
         <label>

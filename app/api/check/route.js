@@ -166,7 +166,7 @@ function parseCards(blockHtml) {
   return cards;
 }
 
-async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null) {
+async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs = 9000) {
   const url =
     "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
     encodeURIComponent(keyword);
@@ -176,7 +176,7 @@ async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null) {
   let proxyAgent = null;
   let dispatcher = redirectDispatcher;
   if (proxyUrl) {
-    proxyAgent = new ProxyAgent({ uri: proxyUrl, headersTimeout: 9000, bodyTimeout: 9000 });
+    proxyAgent = new ProxyAgent({ uri: proxyUrl, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
     dispatcher = proxyAgent.compose(interceptors.redirect({ maxRedirections: 3 }));
   }
   try {
@@ -217,21 +217,22 @@ export async function POST(req) {
     const proxies = parseProxies(body.proxies || process.env.NAVER_PROXIES || "");
     let proxyStart = parseInt(body.proxyStart, 10);
     if (!Number.isFinite(proxyStart)) proxyStart = 0;
+    let timeoutMs = parseInt(body.timeoutMs, 10);
+    if (!Number.isFinite(timeoutMs)) timeoutMs = 9000;
+    timeoutMs = Math.min(Math.max(timeoutMs, 1500), 15000);
 
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
     let attempt;
     let usedProxy = null;
-    // 프록시 있으면 개수만큼(최대 6) 돌려가며 시도, 없으면 3회
-    const MAX_TRY = proxies.length ? Math.min(Math.max(proxies.length, 2), 6) : 3;
+    // 프록시 1개면 1회(클라가 로테이션 담당), 여러개면 개수만큼, 없으면 3회
+    const MAX_TRY = proxies.length ? (proxies.length === 1 ? 1 : Math.min(proxies.length, 6)) : 3;
     for (let t = 0; t < MAX_TRY; t++) {
-      // 매 시도마다 지문(헤더 세트) 통째로 랜덤 로테이션
       const fpIdx = Math.floor(Math.random() * PROFILES.length);
       const proxyUrl = proxies.length ? proxies[(proxyStart + t) % proxies.length] : null;
       usedProxy = proxyUrl ? proxyLabel(proxyUrl) : null;
-      attempt = await fetchSerp(keyword, cookie, fpIdx, proxyUrl);
+      attempt = await fetchSerp(keyword, cookie, fpIdx, proxyUrl, timeoutMs);
       if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
-      // 다음 프록시로 바로 넘어가므로 대기는 짧게 (프록시 없을 땐 백오프 길게)
       if (t < MAX_TRY - 1) {
         await sleep(proxies.length ? 150 : 500 + t * 600 + Math.floor(Math.random() * 300));
       }
