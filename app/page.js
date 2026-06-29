@@ -167,16 +167,19 @@ export default function Home() {
     setRunning(true);
     stopRef.current = false;
     setProgress({ done: 0, total: items.length });
-    setAliveCount(aliveProxies().length);
+    // 매 실행 시작 시 데드 기록 초기화 -> 항상 전체 프록시로 시작 (지난 런의 데드가 발목 안 잡게)
+    deadRef.current = new Map();
+    cursorRef.current = 0;
+    setAliveCount(proxyList.length);
     const gap = Math.max(0, Number(interval) || 0) * 1000;
 
     // 결과를 인덱스 순서로 유지 (병렬이라 끝나는 순서가 뒤섞임)
     const results = items.map((it) => ({ keyword: it.keyword, _mid: it.mid, _pending: true }));
     setRows(results.slice());
 
-    // 동시 실행 수: 프록시 있으면 살아있는 프록시 수 넘지 않게 (한 프록시 동시타격 방지)
+    // 동시 실행 수: 프록시 있으면 프록시 개수 넘지 않게 (한 프록시 동시타격 방지)
     let n = Math.max(1, Math.min(Number(concurrency) || 1, 20));
-    if (proxyList.length) n = Math.min(n, Math.max(aliveProxies().length, 1));
+    if (proxyList.length) n = Math.min(n, proxyList.length);
 
     let next = 0;
     let done = 0;
