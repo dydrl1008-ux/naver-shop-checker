@@ -39,6 +39,7 @@ export default function Home() {
   const [noLogin, setNoLogin] = useState(true);
   const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 잠시 빼기
   const [racingN, setRacingN] = useState(1);       // 키워드당 동시 발사 (가입형은 1=트래픽 절약, 차단 잦으면 ↑)
+  const [gatewayMode, setGatewayMode] = useState(true); // 게이트웨이 모드: 한 줄로 IP 자동로테이션 (동시제한 해제)
   const [aliveCount, setAliveCount] = useState(0);
   const [reviveMin, setReviveMin] = useState(3);   // 데드 후 복귀까지(분)
   const [rows, setRows] = useState([]);
@@ -167,6 +168,22 @@ export default function Home() {
   // 경쟁 발사: 키워드당 프록시 N개 동시에 쏴서 제일 먼저 성공하는 거 채택
   async function fetchKeyword(it, { debug = false } = {}) {
     if (!proxyList.length) return await checkOne(it, { debug }); // 프록시 없으면 그냥
+
+    // 주거용 게이트웨이 모드: 한 줄이 IP 자동로테이션이라 데드 처리 없이 같은 줄 재시도
+    if (gatewayMode) {
+      const line = proxyList[0];
+      let last = null;
+      const tries = fastMode ? 3 : 4; // 차단/실패 시 같은 게이트웨이로 재시도(매번 다른 IP)
+      for (let k = 0; k < tries; k++) {
+        if (stopRef.current) break;
+        const r = await checkOne(it, { debug, proxyLine: line });
+        last = r;
+        if (!r.blocked && !r.error) return r;
+      }
+      return last || { keyword: it.keyword, error: "실패", _mid: it.mid };
+    }
+
+    // 무료 가입형(여러 줄) 모드: 경쟁 발사 + 죽으면 복귀 로테이션
     const fire = fastMode ? Math.max(1, Math.min(Number(racingN) || 5, 10)) : 1;
     const rounds = fastMode ? 4 : 6; // 라운드 수 (한 라운드 = fire개 동시발사)
     let last = null;
@@ -217,7 +234,8 @@ export default function Home() {
     const maxN = fastMode ? 100 : 30;
     let n = Math.max(1, Math.min(Number(concurrency) || 1, maxN));
     if (fire > 1) n = Math.max(1, Math.min(n, Math.floor(200 / fire)));
-    if (proxyList.length) n = Math.min(n, proxyList.length);
+    // 게이트웨이 모드: 한 줄이어도 IP 수백만개 자동로테이션이라 줄수로 안 묶음
+    if (proxyList.length && !gatewayMode) n = Math.min(n, proxyList.length);
 
     let next = 0;
     let done = 0;
@@ -330,10 +348,14 @@ export default function Home() {
           비로그인 모드 (쿠키 안 씀 · 세션 추적 회피)
         </label>
         <label className="chk">
+          <input type="checkbox" checked={gatewayMode} onChange={(e) => setGatewayMode(e.target.checked)} />
+          주거용 게이트웨이 모드 (한 줄로 IP 자동로테이션 · 동시제한 해제 · 복귀로직 끔)
+        </label>
+        <label className="chk">
           <input type="checkbox" checked={fastMode} onChange={(e) => setFastMode(e.target.checked)} />
           고속 모드 (타임아웃 짧게 · 차단되면 다음 프록시로)
         </label>
-        {fastMode && (
+        {fastMode && !gatewayMode && (
           <label>
             키워드당 동시 발사 (1=트래픽 절약 / ↑=차단 잦을 때)
             <input type="number" min={1} max={10} value={racingN} onChange={(e) => setRacingN(e.target.value)} />
