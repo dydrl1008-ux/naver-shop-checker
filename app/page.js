@@ -40,6 +40,7 @@ export default function Home() {
   const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 잠시 빼기
   const [racingN, setRacingN] = useState(1);       // 키워드당 동시 발사 (가입형은 1=트래픽 절약, 차단 잦으면 ↑)
   const [gatewayMode, setGatewayMode] = useState(true); // 게이트웨이 모드: 한 줄로 IP 자동로테이션 (동시제한 해제)
+  const [autoRetry, setAutoRetry] = useState(4); // 차단/실패 시 자동 재시도 횟수
   const [aliveCount, setAliveCount] = useState(0);
   const [reviveMin, setReviveMin] = useState(3);   // 데드 후 복귀까지(분)
   const [rows, setRows] = useState([]);
@@ -243,12 +244,18 @@ export default function Home() {
       while (!stopRef.current) {
         const i = next++;
         if (i >= items.length) return;
-        const r = await fetchKeyword(items[i]);
+        let r = await fetchKeyword(items[i]);
+        // 차단/실패면 자동 재시도 (로테이션이라 매번 다른 IP)
+        const maxRetry = Math.max(0, Number(autoRetry) || 0);
+        for (let a = 0; a < maxRetry && !stopRef.current && (r.blocked || r.error); a++) {
+          results[i] = { ...results[i], _pending: true, _retrying: true };
+          setRows(results.slice());
+          r = await fetchKeyword(items[i]);
+        }
         results[i] = r;
         done++;
         setRows(results.slice());
         setProgress({ done, total: items.length });
-        // 간격 + 지터(랜덤 0~80%) -> 기계적 타이밍 회피
         if (gap) await new Promise((res) => setTimeout(res, gap + Math.floor(Math.random() * gap * 0.8)));
       }
     };
@@ -369,6 +376,10 @@ export default function Home() {
         <label>
           동시 실행 수
           <input type="number" min={1} max={100} value={concurrency} onChange={(e) => setConcurrency(e.target.value)} />
+        </label>
+        <label>
+          차단 자동 재시도
+          <input type="number" min={0} max={10} value={autoRetry} onChange={(e) => setAutoRetry(e.target.value)} />
         </label>
 
         <label className="full">

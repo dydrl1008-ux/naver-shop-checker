@@ -194,8 +194,18 @@ async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs 
   let proxyAgent = null;
   let dispatcher = redirectDispatcher;
   if (proxyUrl) {
-    proxyAgent = new ProxyAgent({ uri: proxyUrl, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    // 로테이션 게이트웨이(823): 커넥션 재사용하면 같은 IP로 가므로
+    // keep-alive 끄고 connection:close로 매 요청 새 연결 = 새 IP 강제
+    proxyAgent = new ProxyAgent({
+      uri: proxyUrl,
+      headersTimeout: timeoutMs,
+      bodyTimeout: timeoutMs,
+      pipelining: 0,
+      keepAliveTimeout: 1,
+      keepAliveMaxTimeout: 1,
+    });
     dispatcher = proxyAgent.compose(interceptors.redirect({ maxRedirections: 3 }));
+    headers["connection"] = "close";
   }
   try {
     const res = await request(url, { method: "GET", headers, dispatcher });
