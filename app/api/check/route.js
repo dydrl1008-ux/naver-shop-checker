@@ -63,40 +63,70 @@ function clean(s) {
     .trim();
 }
 
-// 모바일 UA 풀 (재시도마다 로테이션)
-const UA_POOL = [
-  "Mozilla/5.0 (Linux; Android 14; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
-  "Mozilla/5.0 (Linux; Android 13; SM-G991N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
-  "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+// 지문(fingerprint) 풀 — UA만이 아니라 그에 맞는 헤더 세트 전체를 묶어서 로테이션한다.
+// (UA만 바꾸고 나머지 헤더가 동일하면 봇으로 잡힘)
+const PROFILES = [
+  {
+    ua: "Mozilla/5.0 (Linux; Android 14; SM-S918N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    chua: '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Mobile/15E148 Safari/604.1",
+    lang: "ko-KR,ko;q=0.9",
+    safari: true,
+  },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 13; SM-G991N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9,en;q=0.8",
+    chua: '"Google Chrome";v="125", "Chromium";v="125", "Not.A/Brand";v="99"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9,en-US;q=0.7",
+    chua: '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
+    lang: "ko-KR,ko;q=0.9,en-US;q=0.8",
+    safari: true,
+  },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 12; SM-A536N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9",
+    chua: '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+    platform: '"Android"',
+  },
+];
+const ACCEPTS = [
+  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+  "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
 ];
 
-function browserHeaders(uaIdx = 0) {
-  const ua = UA_POOL[uaIdx % UA_POOL.length];
-  const isIphone = /iPhone/.test(ua);
+function browserHeaders(idx = 0) {
+  const p = PROFILES[idx % PROFILES.length];
   const h = {
-    "user-agent": ua,
-    accept:
-      "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
-    "accept-language": "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    "user-agent": p.ua,
+    accept: ACCEPTS[idx % ACCEPTS.length],
+    "accept-language": p.lang,
     "accept-encoding": "gzip, deflate, br",
     "cache-control": "max-age=0",
     referer: "https://m.naver.com/",
-    "sec-ch-ua": '"Chromium";v="126", "Not.A/Brand";v="24", "Google Chrome";v="126"',
-    "sec-ch-ua-mobile": "?1",
-    "sec-ch-ua-platform": isIphone ? '"iOS"' : '"Android"',
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
     "sec-fetch-site": "same-site",
     "sec-fetch-user": "?1",
     "upgrade-insecure-requests": "1",
   };
-  if (isIphone) {
-    // Safari는 sec-ch-ua 계열을 안 보냄 -> 지문 정합 위해 제거
-    delete h["sec-ch-ua"];
-    delete h["sec-ch-ua-mobile"];
-    delete h["sec-ch-ua-platform"];
+  if (p.safari) {
+    // Safari는 sec-ch-ua 계열 안 보냄
+  } else {
+    h["sec-ch-ua"] = p.chua;
+    h["sec-ch-ua-mobile"] = "?1";
+    h["sec-ch-ua-platform"] = p.platform;
   }
   return h;
 }
@@ -182,7 +212,8 @@ export async function POST(req) {
     let cut = parseInt(body.cut, 10) || 4;             // 노출 인정 등수 (기본 4)
     cut = Math.min(Math.max(cut, 1), 50);
     const adExclude = body.adExclude !== false;        // 기본 true: 광고 제외하고 순위
-    const cookie = (body.cookie || process.env.NAVER_COOKIE || "").trim();
+    const noLogin = body.noLogin === true;             // 비로그인 모드: 쿠키 무시
+    const cookie = noLogin ? "" : (body.cookie || process.env.NAVER_COOKIE || "").trim();
     const proxies = parseProxies(body.proxies || process.env.NAVER_PROXIES || "");
     let proxyStart = parseInt(body.proxyStart, 10);
     if (!Number.isFinite(proxyStart)) proxyStart = 0;
@@ -194,10 +225,11 @@ export async function POST(req) {
     // 프록시 있으면 개수만큼(최대 6) 돌려가며 시도, 없으면 3회
     const MAX_TRY = proxies.length ? Math.min(Math.max(proxies.length, 2), 6) : 3;
     for (let t = 0; t < MAX_TRY; t++) {
-      const uaIdx = (Math.floor(Math.random() * UA_POOL.length) + t) % UA_POOL.length;
+      // 매 시도마다 지문(헤더 세트) 통째로 랜덤 로테이션
+      const fpIdx = Math.floor(Math.random() * PROFILES.length);
       const proxyUrl = proxies.length ? proxies[(proxyStart + t) % proxies.length] : null;
       usedProxy = proxyUrl ? proxyLabel(proxyUrl) : null;
-      attempt = await fetchSerp(keyword, cookie, uaIdx, proxyUrl);
+      attempt = await fetchSerp(keyword, cookie, fpIdx, proxyUrl);
       if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
       // 다음 프록시로 바로 넘어가므로 대기는 짧게 (프록시 없을 땐 백오프 길게)
       if (t < MAX_TRY - 1) {

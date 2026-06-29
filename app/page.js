@@ -36,6 +36,7 @@ export default function Home() {
   const [proxies, setProxies] = useState("");
   const [interval, setIntervalMs] = useState(0);
   const [concurrency, setConcurrency] = useState(5);
+  const [noLogin, setNoLogin] = useState(true);
   const [aliveCount, setAliveCount] = useState(0);
   const [rows, setRows] = useState([]);
   const deadRef = useRef(new Map()); // proxyLine -> 복귀시각(ts)
@@ -127,6 +128,7 @@ export default function Home() {
           cut: Number(cut) || 4,
           adExclude,
           cookie,
+          noLogin,
           proxies: proxyLine, // 클라이언트가 고른 1개만 전달
           debug,
         }),
@@ -192,7 +194,8 @@ export default function Home() {
         done++;
         setRows(results.slice());
         setProgress({ done, total: items.length });
-        if (gap) await new Promise((res) => setTimeout(res, gap));
+        // 간격 + 지터(랜덤 0~80%) -> 기계적 타이밍 회피
+        if (gap) await new Promise((res) => setTimeout(res, gap + Math.floor(Math.random() * gap * 0.8)));
       }
     };
     await Promise.all(Array.from({ length: n }, () => worker()));
@@ -285,6 +288,10 @@ export default function Home() {
         <label className="chk">
           <input type="checkbox" checked={adExclude} onChange={(e) => setAdExclude(e.target.checked)} />
           광고 제외하고 순위 계산
+        </label>
+        <label className="chk">
+          <input type="checkbox" checked={noLogin} onChange={(e) => setNoLogin(e.target.checked)} />
+          비로그인 모드 (쿠키 안 씀 · 세션 추적 회피)
         </label>
 
         <label>
