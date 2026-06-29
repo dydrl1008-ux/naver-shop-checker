@@ -143,35 +143,27 @@ const REFERERS = [
   "https://search.naver.com/",
 ];
 
-function browserHeaders(idx = 0) {
-  const p = PROFILES[Math.floor(Math.random() * PROFILES.length)];
-  const ref = REFERERS[Math.floor(Math.random() * REFERERS.length)];
+// 특정 프로필로 헤더 생성 (한 동선 안에서는 같은 프로필 유지 = 사람은 UA 안 바뀜)
+function headersForProfile(p, referer) {
   const h = {
     "user-agent": p.ua,
-    accept: ACCEPTS[Math.floor(Math.random() * ACCEPTS.length)],
+    accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "accept-language": p.lang,
     "accept-encoding": "gzip, deflate, br",
-    "sec-fetch-dest": "document",
-    "sec-fetch-mode": "navigate",
-    "sec-fetch-user": "?1",
-    "upgrade-insecure-requests": "1",
   };
-  // referer 있으면 same-site, 없으면 none + 캐시헤더도 가끔만
-  if (ref) {
-    h.referer = ref;
-    h["sec-fetch-site"] = "same-site";
-  } else {
-    h["sec-fetch-site"] = "none";
-  }
-  if (Math.random() < 0.6) h["cache-control"] = "max-age=0";
-  if (p.safari) {
-    // Safari는 sec-ch-ua 계열 안 보냄
-  } else {
-    h["sec-ch-ua"] = p.chua;
-    h["sec-ch-ua-mobile"] = "?1";
-    h["sec-ch-ua-platform"] = p.platform;
-  }
+  if (referer) h.referer = referer;
   return h;
+}
+
+function browserHeaders(idx = 0) {
+  return headersForProfile(PROFILES[Math.floor(Math.random() * PROFILES.length)], null);
+}
+
+// set-cookie 헤더에서 쿠키 문자열 추출
+function collectCookies(setCookie) {
+  if (!setCookie) return "";
+  const arr = Array.isArray(setCookie) ? setCookie : [setCookie];
+  return arr.map((c) => String(c).split(";")[0]).filter(Boolean).join("; ");
 }
 
 // "네이버 가격비교</h2>" 렌더 헤더가 있는 블록 영역을 잘라낸다.
@@ -227,35 +219,52 @@ async function pingProxy(proxyUrl, timeoutMs = 2500) {
   }
 }
 
-async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs = 9000) {
-  // 진입 파라미터(sm)를 여러 방면으로 — 사람은 다양한 경로로 검색에 들어온다
+async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs = 9000, warmup = true) {
+  // 한 동선 = 한 프로필 유지 (사람은 검색 중간에 기기/UA 안 바꿈)
+  const profile = PROFILES[Math.floor(Math.random() * PROFILES.length)];
+
+  // 검색 URL (진입 파라미터 다양화)
   const SM = ["mtp_hty.top", "mtp_hty.none", "mtp_jum", "mtb_hty.top", "top_hty"];
   const sm = SM[Math.floor(Math.random() * SM.length)];
   const params = new URLSearchParams({ where: "m", sm, query: keyword });
-  // 가끔 ie/추가 파라미터 섞기
   if (Math.random() < 0.5) params.set("ie", "utf8");
-  const url = "https://m.search.naver.com/search.naver?" + params.toString();
-  const headers = browserHeaders(uaIdx);
-  if (cookie) headers.cookie = cookie;
+  const searchUrl = "https://m.search.naver.com/search.naver?" + params.toString();
 
+  // 동선 안에서는 같은 IP 유지하려고 keep-alive 살림 (게이트웨이는 fetchSerp 호출마다 새 에이전트 = 키워드마다 새 IP)
   let proxyAgent = null;
   let dispatcher = redirectDispatcher;
   if (proxyUrl) {
-    // 로테이션 게이트웨이(823): 커넥션 재사용하면 같은 IP로 가므로
-    // keep-alive 끄고 connection:close로 매 요청 새 연결 = 새 IP 강제
-    proxyAgent = new ProxyAgent({
-      uri: proxyUrl,
-      headersTimeout: timeoutMs,
-      bodyTimeout: timeoutMs,
-      pipelining: 0,
-      keepAliveTimeout: 1,
-      keepAliveMaxTimeout: 1,
-    });
+    proxyAgent = new ProxyAgent({ uri: proxyUrl, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
     dispatcher = proxyAgent.compose(interceptors.redirect({ maxRedirections: 3 }));
-    headers["connection"] = "close";
   }
+
   try {
-    const res = await request(url, { method: "GET", headers, dispatcher });
+    let jarCookie = cookie || "";
+    let referer = null;
+
+    // === 동선 1단계: 네이버 모바일 메인 먼저 방문 (쿠키 받고 진짜 진입처럼) ===
+    if (warmup && !cookie) {
+      try {
+        const w = await request("https://m.naver.com/", {
+          method: "GET",
+          headers: headersForProfile(profile, null),
+          dispatcher,
+        });
+        jarCookie = collectCookies(w.headers["set-cookie"]);
+        await w.body.dump(); // 본문 버림(메인은 안 봄)
+        referer = "https://m.naver.com/";
+        // 사람처럼 잠깐 텀 (메인 보고 검색창 누르는 시간)
+        await sleep(250 + Math.floor(Math.random() * 600));
+      } catch {
+        // 워밍업 실패해도 검색은 시도
+      }
+    }
+
+    // === 동선 2단계: 받은 쿠키 + referer 들고 검색 ===
+    const headers = headersForProfile(profile, referer);
+    if (jarCookie) headers.cookie = jarCookie;
+
+    const res = await request(searchUrl, { method: "GET", headers, dispatcher });
     const enc = String(res.headers["content-encoding"] || "").toLowerCase();
     const buf = Buffer.from(await res.body.arrayBuffer());
     let html;
@@ -288,6 +297,7 @@ export async function POST(req) {
     cut = Math.min(Math.max(cut, 1), 50);
     const adExclude = body.adExclude !== false;        // 기본 true: 광고 제외하고 순위
     const noLogin = body.noLogin === true;             // 비로그인 모드: 쿠키 무시
+    const warmup = body.warmup !== false;              // 사람 동선(메인 방문 후 검색), 기본 ON
     const cookie = noLogin ? "" : (body.cookie || process.env.NAVER_COOKIE || "").trim();
     const proxies = parseProxies(body.proxies || process.env.NAVER_PROXIES || "");
     let proxyStart = parseInt(body.proxyStart, 10);
@@ -341,7 +351,7 @@ export async function POST(req) {
       const fpIdx = Math.floor(Math.random() * PROFILES.length);
       const proxyUrl = proxies.length ? proxies[(proxyStart + t) % proxies.length] : null;
       usedProxy = proxyUrl ? proxyLabel(proxyUrl) : null;
-      attempt = await fetchSerp(keyword, cookie, fpIdx, proxyUrl, timeoutMs);
+      attempt = await fetchSerp(keyword, cookie, fpIdx, proxyUrl, timeoutMs, warmup);
       if (attempt.status === 200 && attempt.html.length >= MIN_HTML_LEN) break;
       if (t < MAX_TRY - 1) {
         await sleep(proxies.length ? 150 : 500 + t * 600 + Math.floor(Math.random() * 300));

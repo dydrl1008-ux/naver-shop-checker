@@ -37,6 +37,7 @@ export default function Home() {
   const [interval, setIntervalMs] = useState(0.4);
   const [concurrency, setConcurrency] = useState(6);
   const [noLogin, setNoLogin] = useState(true);
+  const [humanJourney, setHumanJourney] = useState(true); // 사람 동선: 네이버 메인 먼저 방문 후 검색
   const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 잠시 빼기
   const [racingN, setRacingN] = useState(1);       // 키워드당 동시 발사 (가입형은 1=트래픽 절약, 차단 잦으면 ↑)
   const [gatewayMode, setGatewayMode] = useState(true); // 게이트웨이 모드: 한 줄로 IP 자동로테이션 (동시제한 해제)
@@ -177,6 +178,7 @@ export default function Home() {
           adExclude,
           cookie,
           noLogin,
+          warmup: humanJourney,
           proxies: proxyLine, // 클라이언트가 고른 1개만 전달
           timeoutMs: fastMode ? 7000 : 10000,
           debug,
@@ -290,6 +292,48 @@ export default function Home() {
     setRows((prev) => prev.map((x, idx) => (idx === i ? r : x)));
   }
 
+  // 차단/실패한 줄 개수
+  const failedCount = useMemo(
+    () => rows.filter((r) => r && (r.blocked || r.error) && !r._pending).length,
+    [rows]
+  );
+
+  // 차단/실패한 것들만 전체 재시도 (동시 처리)
+  async function retryAllFailed() {
+    if (running) return;
+    const targets = rows.map((r, i) => ({ r, i })).filter(({ r }) => r && (r.blocked || r.error) && !r._pending);
+    if (!targets.length) return;
+    setRunning(true);
+    stopRef.current = false;
+    // 재시도 대상 표시
+    setRows((prev) => prev.map((x, idx) => (targets.find((t) => t.i === idx) ? { ...x, _pending: true, _retrying: true } : x)));
+
+    const fire = fastMode ? Math.max(1, Math.min(Number(racingN) || 5, 10)) : 1;
+    const maxN = fastMode ? 100 : 30;
+    let n = Math.max(1, Math.min(Number(concurrency) || 1, maxN));
+    if (fire > 1) n = Math.max(1, Math.min(n, Math.floor(200 / fire)));
+    if (proxyList.length && !gatewayMode) n = Math.min(n, proxyList.length);
+
+    let ptr = 0;
+    const worker = async () => {
+      while (!stopRef.current) {
+        const j = ptr++;
+        if (j >= targets.length) return;
+        const { r: r0, i } = targets[j];
+        let r = await fetchKeyword({ keyword: r0.keyword, mid: r0._mid });
+        const maxRetry = Math.max(0, Number(autoRetry) || 0);
+        for (let a = 0; a < maxRetry && !stopRef.current && (r.blocked || r.error); a++) {
+          await new Promise((res) => setTimeout(res, 1500 + Math.floor(Math.random() * 1500)));
+          r = await fetchKeyword({ keyword: r0.keyword, mid: r0._mid });
+        }
+        r._mid = r0._mid;
+        setRows((prev) => prev.map((x, idx) => (idx === i ? r : x)));
+      }
+    };
+    await Promise.all(Array.from({ length: n }, () => worker()));
+    setRunning(false);
+  }
+
   // 서버가 실제로 받는 raw HTML 받아오기 (블록 판별 기준 잡기용)
   async function downloadRawHtml() {
     const kw = (prompt("원본 HTML 받을 키워드 1개 (블록 뜨는 거 추천):", list[0]?.keyword || "") || "").trim();
@@ -367,6 +411,10 @@ export default function Home() {
         <label className="chk">
           <input type="checkbox" checked={adExclude} onChange={(e) => setAdExclude(e.target.checked)} />
           광고 제외하고 순위 계산
+        </label>
+        <label className="chk">
+          <input type="checkbox" checked={humanJourney} onChange={(e) => setHumanJourney(e.target.checked)} />
+          사람 동선 모드 (네이버 메인 먼저 방문해서 쿠키 받고 검색 · 차단 회피)
         </label>
         <label className="chk">
           <input type="checkbox" checked={noLogin} onChange={(e) => setNoLogin(e.target.checked)} />
@@ -468,10 +516,18 @@ export default function Home() {
         <div className="goodhead">
           <span>
             블록 O + 내 상품 {cut}등 이내 <b>{goodKeywords.length}</b>개
+            {failedCount > 0 && <span style={{ color: "#d33", marginLeft: 10 }}>· 차단/실패 {failedCount}개</span>}
           </span>
-          <button className="copy" onClick={copyGood} disabled={!goodKeywords.length}>
-            {copied ? "복사됨 ✓" : "복사"}
-          </button>
+          <span style={{ display: "flex", gap: 8 }}>
+            {failedCount > 0 && (
+              <button className="copy" style={{ background: "#d33", borderColor: "#d33" }} onClick={retryAllFailed} disabled={running}>
+                차단된 거 전체 재시도 ({failedCount})
+              </button>
+            )}
+            <button className="copy" onClick={copyGood} disabled={!goodKeywords.length}>
+              {copied ? "복사됨 ✓" : "복사"}
+            </button>
+          </span>
         </div>
         <textarea
           ref={outRef}
