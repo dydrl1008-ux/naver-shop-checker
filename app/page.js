@@ -34,13 +34,13 @@ export default function Home() {
   const [adExclude, setAdExclude] = useState(true);
   const [cookie, setCookie] = useState("");
   const [proxies, setProxies] = useState("");
-  const [interval, setIntervalMs] = useState(0);
-  const [concurrency, setConcurrency] = useState(10);
+  const [interval, setIntervalMs] = useState(0.4);
+  const [concurrency, setConcurrency] = useState(6);
   const [noLogin, setNoLogin] = useState(true);
   const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 잠시 빼기
   const [racingN, setRacingN] = useState(1);       // 키워드당 동시 발사 (가입형은 1=트래픽 절약, 차단 잦으면 ↑)
   const [gatewayMode, setGatewayMode] = useState(true); // 게이트웨이 모드: 한 줄로 IP 자동로테이션 (동시제한 해제)
-  const [autoRetry, setAutoRetry] = useState(4); // 차단/실패 시 자동 재시도 횟수
+  const [autoRetry, setAutoRetry] = useState(1); // 차단/실패 시 자동 재시도 횟수 (많으면 봇 패턴되니 적게)
   const [aliveCount, setAliveCount] = useState(0);
   const [reviveMin, setReviveMin] = useState(3);   // 데드 후 복귀까지(분)
   const [rows, setRows] = useState([]);
@@ -194,18 +194,11 @@ export default function Home() {
   async function fetchKeyword(it, { debug = false } = {}) {
     if (!proxyList.length) return await checkOne(it, { debug }); // 프록시 없으면 그냥
 
-    // 주거용 게이트웨이 모드: 한 줄이 IP 자동로테이션이라 데드 처리 없이 같은 줄 재시도
+    // 주거용 게이트웨이 모드: 한 줄이 IP 자동로테이션. 차단되면 더 때리면 역효과라 1번만.
     if (gatewayMode) {
       const line = proxyList[0];
-      let last = null;
-      const tries = fastMode ? 3 : 4; // 차단/실패 시 같은 게이트웨이로 재시도(매번 다른 IP)
-      for (let k = 0; k < tries; k++) {
-        if (stopRef.current) break;
-        const r = await checkOne(it, { debug, proxyLine: line });
-        last = r;
-        if (!r.blocked && !r.error) return r;
-      }
-      return last || { keyword: it.keyword, error: "실패", _mid: it.mid };
+      const r = await checkOne(it, { debug, proxyLine: line });
+      return r;
     }
 
     // 무료 가입형(여러 줄) 모드: 경쟁 발사 + 죽으면 복귀 로테이션
@@ -269,11 +262,12 @@ export default function Home() {
         const i = next++;
         if (i >= items.length) return;
         let r = await fetchKeyword(items[i]);
-        // 차단/실패면 자동 재시도 (로테이션이라 매번 다른 IP)
+        // 차단/실패면 자동 재시도 — 단, 바로 또 때리면 봇 패턴이라 텀 두고
         const maxRetry = Math.max(0, Number(autoRetry) || 0);
         for (let a = 0; a < maxRetry && !stopRef.current && (r.blocked || r.error); a++) {
           results[i] = { ...results[i], _pending: true, _retrying: true };
           setRows(results.slice());
+          await new Promise((res) => setTimeout(res, 1500 + Math.floor(Math.random() * 1500))); // 1.5~3초 쉬고
           r = await fetchKeyword(items[i]);
         }
         results[i] = r;

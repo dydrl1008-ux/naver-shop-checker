@@ -100,27 +100,70 @@ const PROFILES = [
     chua: '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
     platform: '"Android"',
   },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 14; SM-S926N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7",
+    chua: '"Chromium";v="128", "Not;A=Brand";v="24", "Google Chrome";v="128"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 17_6_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Mobile/15E148 Safari/604.1",
+    lang: "ko-KR,ko;q=0.9,en;q=0.8",
+    safari: true,
+  },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 13; SM-A346N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9",
+    chua: '"Google Chrome";v="126", "Chromium";v="126", "Not.A/Brand";v="24"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (Linux; Android 14; SM-F956N) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.0.0 Mobile Safari/537.36",
+    lang: "ko-KR,ko;q=0.9,en-US;q=0.6",
+    chua: '"Not)A;Brand";v="99", "Google Chrome";v="127", "Chromium";v="127"',
+    platform: '"Android"',
+  },
+  {
+    ua: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+    lang: "ko-KR,ko;q=0.9",
+    safari: true,
+  },
 ];
 const ACCEPTS = [
   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
   "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+  "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.9",
+];
+// 진입 경로(referer)를 여러 방면으로 — 사람은 다양한 데서 검색에 들어온다
+const REFERERS = [
+  "https://m.naver.com/",
+  "https://www.naver.com/",
+  "https://m.search.naver.com/",
+  null, // 직접 진입(referer 없음)
+  "https://search.naver.com/",
 ];
 
 function browserHeaders(idx = 0) {
-  const p = PROFILES[idx % PROFILES.length];
+  const p = PROFILES[Math.floor(Math.random() * PROFILES.length)];
+  const ref = REFERERS[Math.floor(Math.random() * REFERERS.length)];
   const h = {
     "user-agent": p.ua,
-    accept: ACCEPTS[idx % ACCEPTS.length],
+    accept: ACCEPTS[Math.floor(Math.random() * ACCEPTS.length)],
     "accept-language": p.lang,
     "accept-encoding": "gzip, deflate, br",
-    "cache-control": "max-age=0",
-    referer: "https://m.naver.com/",
     "sec-fetch-dest": "document",
     "sec-fetch-mode": "navigate",
-    "sec-fetch-site": "same-site",
     "sec-fetch-user": "?1",
     "upgrade-insecure-requests": "1",
   };
+  // referer 있으면 same-site, 없으면 none + 캐시헤더도 가끔만
+  if (ref) {
+    h.referer = ref;
+    h["sec-fetch-site"] = "same-site";
+  } else {
+    h["sec-fetch-site"] = "none";
+  }
+  if (Math.random() < 0.6) h["cache-control"] = "max-age=0";
   if (p.safari) {
     // Safari는 sec-ch-ua 계열 안 보냄
   } else {
@@ -185,9 +228,13 @@ async function pingProxy(proxyUrl, timeoutMs = 2500) {
 }
 
 async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs = 9000) {
-  const url =
-    "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
-    encodeURIComponent(keyword);
+  // 진입 파라미터(sm)를 여러 방면으로 — 사람은 다양한 경로로 검색에 들어온다
+  const SM = ["mtp_hty.top", "mtp_hty.none", "mtp_jum", "mtb_hty.top", "top_hty"];
+  const sm = SM[Math.floor(Math.random() * SM.length)];
+  const params = new URLSearchParams({ where: "m", sm, query: keyword });
+  // 가끔 ie/추가 파라미터 섞기
+  if (Math.random() < 0.5) params.set("ie", "utf8");
+  const url = "https://m.search.naver.com/search.naver?" + params.toString();
   const headers = browserHeaders(uaIdx);
   if (cookie) headers.cookie = cookie;
 
