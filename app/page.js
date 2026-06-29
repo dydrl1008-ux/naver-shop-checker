@@ -38,22 +38,34 @@ export default function Home() {
   const [concurrency, setConcurrency] = useState(5);
   const [noLogin, setNoLogin] = useState(true);
   const [aliveCount, setAliveCount] = useState(0);
+  const [collected, setCollected] = useState([]); // 자동 수집된 프록시
+  const [collecting, setCollecting] = useState(false);
+  const [reviveMin, setReviveMin] = useState(10); // 데드 후 복귀까지(분)
+  const [statsTick, setStatsTick] = useState(0);   // 통계 리렌더 트리거
   const [rows, setRows] = useState([]);
-  const deadRef = useRef(new Map()); // proxyLine -> 복귀시각(ts)
+  const deadRef = useRef(new Map());  // proxyLine -> 복귀시각(ts)
+  const statsRef = useRef(new Map()); // proxyLine -> {deaths, lastDeadAt, reviveSum, reviveN, success}
   const cursorRef = useRef(0);
-  const REVIVE_MS = 10 * 60 * 1000; // 죽은 프록시 10분 뒤 자동 복귀
 
-  const proxyList = useMemo(
-    () => proxies.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean),
-    [proxies]
-  );
+  // 수동 입력 + 자동 수집 합친 풀 (중복 제거)
+  const proxyList = useMemo(() => {
+    const manual = proxies.split(/[\n,]+/).map((s) => s.trim()).filter(Boolean);
+    const seen = new Set();
+    return [...manual, ...collected].filter((p) => (seen.has(p) ? false : (seen.add(p), true)));
+  }, [proxies, collected]);
   const proxyCount = proxyList.length;
+  const REVIVE_MS = Math.max(0.5, Number(reviveMin) || 10) * 60 * 1000;
 
+  function st(line) {
+    let s = statsRef.current.get(line);
+    if (!s) { s = { deaths: 0, lastDeadAt: 0, reviveSum: 0, reviveN: 0, success: 0 }; statsRef.current.set(line, s); }
+    return s;
+  }
   function aliveProxies() {
     const now = Date.now();
     return proxyList.filter((p) => {
       const t = deadRef.current.get(p);
-      return !t || t <= now; // 데드 기록 없거나 10분 지났으면 살아있음
+      return !t || t <= now;
     });
   }
   function nextAlive() {
@@ -64,16 +76,74 @@ export default function Home() {
     return p;
   }
   function markDead(line) {
-    if (line) deadRef.current.set(line, Date.now() + REVIVE_MS);
+    if (!line) return;
+    deadRef.current.set(line, Date.now() + REVIVE_MS);
+    const s = st(line);
+    s.deaths += 1;
+    s.lastDeadAt = Date.now();
     setAliveCount(aliveProxies().length);
+    setStatsTick((x) => x + 1);
+  }
+  function markSuccess(line) {
+    if (!line) return;
+    const s = st(line);
+    s.success += 1;
+    // 죽었다 살아난 거면 부활시간 기록
+    if (s.lastDeadAt) {
+      s.reviveSum += Date.now() - s.lastDeadAt;
+      s.reviveN += 1;
+      s.lastDeadAt = 0;
+    }
+    setStatsTick((x) => x + 1);
   }
 
-  // 프록시 목록 바뀌면 데드 기록 초기화 + 살아있음 카운트 갱신
+  // 무료 프록시 자동 수집
+  async function collectProxies() {
+    if (collecting) return;
+    setCollecting(true);
+    try {
+      const res = await fetch("/api/proxies", { method: "POST" });
+      const d = await res.json();
+      if (d.proxies?.length) {
+        setCollected(d.proxies);
+        deadRef.current = new Map();
+        statsRef.current = new Map();
+        cursorRef.current = 0;
+        alert(`프록시 ${d.total}개 수집됨 (소스 ${d.sources}개)`);
+      } else {
+        alert("수집 실패: " + (d.error || "0개"));
+      }
+    } catch (e) {
+      alert("수집 오류: " + e.message);
+    }
+    setCollecting(false);
+  }
+
+  // 프록시 생애주기 요약
+  const lifeStats = useMemo(() => {
+    void statsTick;
+    let revivedN = 0, reviveSumAll = 0, totalDeaths = 0, totalSuccess = 0, everDead = 0;
+    statsRef.current.forEach((s) => {
+      totalDeaths += s.deaths;
+      totalSuccess += s.success;
+      if (s.deaths) everDead += 1;
+      if (s.reviveN) { revivedN += s.reviveN; reviveSumAll += s.reviveSum; }
+    });
+    return {
+      avgReviveMin: revivedN ? (reviveSumAll / revivedN / 60000).toFixed(1) : null,
+      revivedCount: revivedN,
+      everDead,
+      totalDeaths,
+      totalSuccess,
+    };
+  }, [statsTick]);
+
+  // 프록시 목록 바뀌면 데드/통계 초기화
   useEffect(() => {
     deadRef.current = new Map();
     cursorRef.current = 0;
     setAliveCount(proxyList.length);
-  }, [proxies]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [proxies, collected]); // eslint-disable-line react-hooks/exhaustive-deps
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [copied, setCopied] = useState(false);
@@ -154,10 +224,11 @@ export default function Home() {
       const r = await checkOne(it, { debug, proxyLine: p });
       last = r;
       if (!r.blocked && !r.error) {
+        markSuccess(p); // 성공 -> 통계 기록(죽었다 살아난 거면 부활시간도)
         setAliveCount(aliveProxies().length);
-        return r; // 성공 -> 이 프록시 살려둠
+        return r;
       }
-      markDead(p); // 실패 -> 10분 데드, 다음 살아있는 프록시로
+      markDead(p); // 실패 -> 데드, 다음 살아있는 프록시로
     }
     return last || { keyword: it.keyword, error: "살아있는 프록시 없음", _mid: it.mid };
   }
@@ -309,20 +380,49 @@ export default function Home() {
         </label>
 
         <label className="full">
-          프록시 (선택 · 한 줄에 하나, 요청마다 로테이션 / 죽으면 10분 뒤 자동 복귀){" "}
-          {proxyCount > 0 && (
-            <b style={{ color: "#03c75a" }}>
-              {proxyCount}개 · 살아있음 {aliveCount}
-              {proxyCount - aliveCount > 0 ? ` · 데드 ${proxyCount - aliveCount}` : ""}
-            </b>
-          )}
+          <div className="prx-head">
+            <span>
+              프록시 (수동 입력 + 자동 수집 / 죽으면 일정시간 뒤 자동 복귀){" "}
+              {proxyCount > 0 && (
+                <b style={{ color: "#03c75a" }}>
+                  {proxyCount}개 · 살아있음 {aliveCount}
+                  {proxyCount - aliveCount > 0 ? ` · 데드 ${proxyCount - aliveCount}` : ""}
+                </b>
+              )}
+            </span>
+            <span className="prx-ctrl">
+              <button type="button" className="collect" onClick={collectProxies} disabled={collecting}>
+                {collecting ? "수집 중…" : "무료 프록시 수집"}
+              </button>
+              복귀(분)
+              <input
+                type="number" min={0.5} max={120} step={0.5}
+                value={reviveMin}
+                onChange={(e) => setReviveMin(e.target.value)}
+                style={{ width: 64 }}
+              />
+            </span>
+          </div>
+          {collected.length > 0 && <div className="prx-note">자동 수집 {collected.length}개 풀에 포함됨</div>}
           <textarea
-            rows={4}
+            rows={3}
             value={proxies}
             onChange={(e) => setProxies(e.target.value)}
-            placeholder={"호스트:포트:아이디:비번  (Webshare 형식)\n198.23.239.134:6540:user:pass\n107.172.163.27:6543:user:pass"}
+            placeholder={"수동으로 넣을 프록시 (host:port 또는 host:port:user:pass)\n비워두고 '무료 프록시 수집'만 눌러도 됨"}
           />
         </label>
+
+        {(lifeStats.everDead > 0 || lifeStats.totalSuccess > 0) && (
+          <div className="lifebox">
+            <b>프록시 생애주기</b>
+            <span>네이버 통과 성공 {lifeStats.totalSuccess}회</span>
+            <span>죽은 적 있는 프록시 {lifeStats.everDead}개 / 총 차단 {lifeStats.totalDeaths}회</span>
+            <span>
+              부활 관측 {lifeStats.revivedCount}회
+              {lifeStats.avgReviveMin ? ` · 평균 부활시간 ${lifeStats.avgReviveMin}분` : " · (아직 부활 관측 전)"}
+            </span>
+          </div>
+        )}
       </div>
 
       <div className="btns">
