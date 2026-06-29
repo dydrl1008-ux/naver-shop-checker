@@ -126,48 +126,40 @@ export default function Home() {
     setCollecting(false);
   }
 
-  // 사전 청소: 풀 전체를 핑으로 훑어서 응답 없는(죽은) 프록시 제거
+  // 사전 청소: 풀을 묶음으로 서버에 보내 서버가 일괄 핑 -> 살아있는 것만 회수
   async function cleanProxies() {
     if (cleaning) return;
-    const pool = proxyList.slice();
-    if (!pool.length) { alert("청소할 프록시가 없다. 먼저 수집해라."); return; }
+    const poolArr = proxyList.slice();
+    if (!poolArr.length) { alert("청소할 프록시가 없다. 먼저 수집해라."); return; }
     setCleaning(true);
     stopRef.current = false;
-    setCleanProg({ done: 0, total: pool.length, alive: 0 });
+    setCleanProg({ done: 0, total: poolArr.length, alive: 0 });
+
+    const CHUNK = 1500;       // 한 번에 서버로 보낼 개수
     const alive = [];
-    let idx = 0, done = 0;
-    const PING_CONC = 300; // 핑은 가벼워서 동시 최대로
-    const worker = async () => {
-      while (!stopRef.current) {
-        const i = idx++;
-        if (i >= pool.length) return;
-        const p = pool[i];
-        try {
-          const res = await fetch("/api/check", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ping: true, proxies: p, timeoutMs: 1200 }),
-          });
-          const d = await res.json();
-          if (d.alive) alive.push(p);
-        } catch {}
-        done++;
-        if (done % 50 === 0 || done === pool.length) {
-          setCleanProg({ done, total: pool.length, alive: alive.length });
-        }
-      }
-    };
-    await Promise.all(Array.from({ length: PING_CONC }, () => worker()));
-    // 살아있는 것만 남기기
+    for (let i = 0; i < poolArr.length; i += CHUNK) {
+      if (stopRef.current) break;
+      const chunk = poolArr.slice(i, i + CHUNK);
+      try {
+        const res = await fetch("/api/clean", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ proxies: chunk.join("\n"), timeoutMs: 1200, concurrency: 250 }),
+        });
+        const d = await res.json();
+        if (Array.isArray(d.alive)) alive.push(...d.alive);
+      } catch {}
+      setCleanProg({ done: Math.min(i + CHUNK, poolArr.length), total: poolArr.length, alive: alive.length });
+    }
+
     setCollected(alive);
     savePool(alive);
-    setProxies(""); // 수동 입력분도 청소 결과로 흡수
+    setProxies("");
     deadRef.current = new Map();
     cursorRef.current = 0;
     setAliveCount(alive.length);
-    setCleanProg({ done: pool.length, total: pool.length, alive: alive.length });
     setCleaning(false);
-    alert(`청소 완료: ${pool.length}개 중 살아있는 ${alive.length}개만 남김`);
+    alert(`청소 완료: ${poolArr.length}개 중 살아있는 ${alive.length}개만 남김`);
   }
 
   // 프록시 생애주기 요약
