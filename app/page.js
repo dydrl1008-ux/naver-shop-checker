@@ -259,24 +259,59 @@ export default function Home() {
 
     let next = 0;
     let done = 0;
+    // 사람 리듬 상태: 연속 차단 감지 / 버스트 카운트 (워커 공유)
+    const rhythm = { recentBlocks: 0, sinceRest: 0, restUntil: 0 };
+
+    const humanGap = async () => {
+      // 불규칙 간격: 대부분 짧고(0.2~1.2초) 가끔 길게(2~5초) = 사람의 들쭉날쭉
+      const base = 200 + Math.floor(Math.random() * 1000);
+      const longPause = Math.random() < 0.15 ? 1500 + Math.floor(Math.random() * 3500) : 0;
+      await new Promise((res) => setTimeout(res, base + longPause));
+    };
+    const maybeRest = async () => {
+      // 일정 개수(랜덤 8~20개)마다 휴식, 또는 연속 차단 감지 시 장기 휴식
+      const now = Date.now();
+      if (now < rhythm.restUntil) {
+        await new Promise((res) => setTimeout(res, rhythm.restUntil - now));
+        return;
+      }
+      if (rhythm.recentBlocks >= 4) {
+        // 연속 차단 = 임계점 닿음 -> 60~120초 길게 쉼 (캡차 풀릴 시간)
+        rhythm.restUntil = Date.now() + 60000 + Math.floor(Math.random() * 60000);
+        rhythm.recentBlocks = 0;
+        rhythm.sinceRest = 0;
+        await new Promise((res) => setTimeout(res, rhythm.restUntil - Date.now()));
+      } else if (rhythm.sinceRest >= 8 + Math.floor(Math.random() * 12)) {
+        // 버스트 후 짧은 휴식 (사람이 몰아보다 잠깐 딴짓)
+        rhythm.sinceRest = 0;
+        await new Promise((res) => setTimeout(res, 4000 + Math.floor(Math.random() * 16000)));
+      }
+    };
+
     const worker = async () => {
       while (!stopRef.current) {
         const i = next++;
         if (i >= items.length) return;
+        await maybeRest();
         let r = await fetchKeyword(items[i]);
-        // 차단/실패면 자동 재시도 — 단, 바로 또 때리면 봇 패턴이라 텀 두고
+        // 연속 차단 추적
+        if (r.blocked || r.error) rhythm.recentBlocks++;
+        else rhythm.recentBlocks = 0;
+        rhythm.sinceRest++;
+        // 차단/실패면 자동 재시도 — 텀 두고
         const maxRetry = Math.max(0, Number(autoRetry) || 0);
         for (let a = 0; a < maxRetry && !stopRef.current && (r.blocked || r.error); a++) {
           results[i] = { ...results[i], _pending: true, _retrying: true };
           setRows(results.slice());
-          await new Promise((res) => setTimeout(res, 1500 + Math.floor(Math.random() * 1500))); // 1.5~3초 쉬고
+          await new Promise((res) => setTimeout(res, 1500 + Math.floor(Math.random() * 1500)));
           r = await fetchKeyword(items[i]);
+          if (!r.blocked && !r.error) rhythm.recentBlocks = 0;
         }
         results[i] = r;
         done++;
         setRows(results.slice());
         setProgress({ done, total: items.length });
-        if (gap) await new Promise((res) => setTimeout(res, gap + Math.floor(Math.random() * gap * 0.8)));
+        await humanGap(); // 불규칙 간격(사람 리듬)
       }
     };
     await Promise.all(Array.from({ length: n }, () => worker()));
