@@ -38,6 +38,9 @@ export default function Home() {
   const [concurrency, setConcurrency] = useState(5);
   const [noLogin, setNoLogin] = useState(true);
   const [fastMode, setFastMode] = useState(true); // 고속 모드: 타임아웃 짧게, 죽으면 즉시 버림
+  const [racingN, setRacingN] = useState(5);       // 키워드당 동시 발사 프록시 수
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanProg, setCleanProg] = useState({ done: 0, total: 0, alive: 0 });
   const [aliveCount, setAliveCount] = useState(0);
   const [collected, setCollected] = useState([]); // 자동 수집된 프록시
   const [collecting, setCollecting] = useState(false);
@@ -120,6 +123,49 @@ export default function Home() {
       alert("수집 오류: " + e.message);
     }
     setCollecting(false);
+  }
+
+  // 사전 청소: 풀 전체를 핑으로 훑어서 응답 없는(죽은) 프록시 제거
+  async function cleanProxies() {
+    if (cleaning) return;
+    const pool = proxyList.slice();
+    if (!pool.length) { alert("청소할 프록시가 없다. 먼저 수집해라."); return; }
+    setCleaning(true);
+    stopRef.current = false;
+    setCleanProg({ done: 0, total: pool.length, alive: 0 });
+    const alive = [];
+    let idx = 0, done = 0;
+    const PING_CONC = 80; // 핑은 가벼워서 동시 많이
+    const worker = async () => {
+      while (!stopRef.current) {
+        const i = idx++;
+        if (i >= pool.length) return;
+        const p = pool[i];
+        try {
+          const res = await fetch("/api/check", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ ping: true, proxies: p, timeoutMs: 2500 }),
+          });
+          const d = await res.json();
+          if (d.alive) alive.push(p);
+        } catch {}
+        done++;
+        if (done % 25 === 0 || done === pool.length) {
+          setCleanProg({ done, total: pool.length, alive: alive.length });
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: PING_CONC }, () => worker()));
+    // 살아있는 것만 남기기
+    setCollected(alive);
+    setProxies(""); // 수동 입력분도 청소 결과로 흡수
+    deadRef.current = new Map();
+    cursorRef.current = 0;
+    setAliveCount(alive.length);
+    setCleanProg({ done: pool.length, total: pool.length, alive: alive.length });
+    setCleaning(false);
+    alert(`청소 완료: ${pool.length}개 중 살아있는 ${alive.length}개만 남김`);
   }
 
   // 프록시 생애주기 요약
@@ -215,28 +261,34 @@ export default function Home() {
     }
   }
 
-  // 프록시 풀에서 살아있는 것들로 순차 시도, 실패한 건 데드 처리
+  // 경쟁 발사: 키워드당 프록시 N개 동시에 쏴서 제일 먼저 성공하는 거 채택
   async function fetchKeyword(it, { debug = false } = {}) {
     if (!proxyList.length) return await checkOne(it, { debug }); // 프록시 없으면 그냥
-    const tried = new Set();
+    const fire = fastMode ? Math.max(1, Math.min(Number(racingN) || 5, 10)) : 1;
+    const rounds = fastMode ? 4 : 6; // 라운드 수 (한 라운드 = fire개 동시발사)
     let last = null;
-    // 키워드당 시도 상한: 고속 12회 / 일반 6회 (한 키워드가 풀 다 태우는 거 방지)
-    const cap = fastMode ? 12 : 6;
-    const limit = Math.min(Math.max(aliveProxies().length, 1), cap);
-    for (let k = 0; k < limit; k++) {
-      const p = nextAlive();
-      if (!p || tried.has(p)) break;
-      tried.add(p);
-      const r = await checkOne(it, { debug, proxyLine: p });
-      last = r;
-      if (!r.blocked && !r.error) {
-        markSuccess(p); // 성공 -> 통계 기록(죽었다 살아난 거면 부활시간도)
-        setAliveCount(aliveProxies().length);
-        return r;
+    for (let round = 0; round < rounds; round++) {
+      if (stopRef.current) break;
+      const batch = [];
+      const seen = new Set();
+      for (let j = 0; j < fire; j++) {
+        const p = nextAlive();
+        if (p && !seen.has(p)) { seen.add(p); batch.push(p); }
       }
-      markDead(p); // 실패 -> 데드, 다음 살아있는 프록시로
+      if (!batch.length) break;
+      // 동시 발사
+      const settled = await Promise.all(
+        batch.map((p) => checkOne(it, { debug, proxyLine: p }).then((r) => ({ p, r })))
+      );
+      let success = null;
+      for (const { p, r } of settled) {
+        if (!r.blocked && !r.error) { if (!success) success = { p, r }; }
+        else { markDead(p); }
+        last = r;
+      }
+      if (success) { markSuccess(success.p); return success.r; }
     }
-    return last || { keyword: it.keyword, error: "살아있는 프록시 없음", _mid: it.mid };
+    return last || { keyword: it.keyword, error: "프록시 다 실패", _mid: it.mid };
   }
 
   async function run() {
@@ -256,9 +308,12 @@ export default function Home() {
     const results = items.map((it) => ({ keyword: it.keyword, _mid: it.mid, _pending: true }));
     setRows(results.slice());
 
-    // 동시 실행 수: 고속 모드면 40까지, 아니면 20까지. 프록시 풀보단 작게.
+    // 경쟁발사: 워커당 fire개 동시 발사하므로 총 동시요청 = n * fire.
+    // 총합이 ~50 넘지 않게 워커 수 자동 조정.
+    const fire = fastMode ? Math.max(1, Math.min(Number(racingN) || 5, 10)) : 1;
     const maxN = fastMode ? 40 : 20;
     let n = Math.max(1, Math.min(Number(concurrency) || 1, maxN));
+    if (fire > 1) n = Math.max(1, Math.min(n, Math.floor(50 / fire)));
     if (proxyList.length) n = Math.min(n, proxyList.length);
 
     let next = 0;
@@ -373,8 +428,14 @@ export default function Home() {
         </label>
         <label className="chk">
           <input type="checkbox" checked={fastMode} onChange={(e) => setFastMode(e.target.checked)} />
-          고속 모드 (무료 풀용 · 타임아웃 4초 · 죽으면 즉시 버림 · 동시 40까지)
+          고속 모드 (무료 풀용 · 타임아웃 4초 · 죽으면 즉시 버림)
         </label>
+        {fastMode && (
+          <label>
+            키워드당 동시 발사
+            <input type="number" min={1} max={10} value={racingN} onChange={(e) => setRacingN(e.target.value)} />
+          </label>
+        )}
 
         <label>
           요청 간격(초)
@@ -402,15 +463,18 @@ export default function Home() {
               )}
             </span>
             <span className="prx-ctrl">
-              <button type="button" className="collect" onClick={collectProxies} disabled={collecting}>
+              <button type="button" className="collect" onClick={collectProxies} disabled={collecting || cleaning}>
                 {collecting ? "수집 중…" : "무료 프록시 수집"}
+              </button>
+              <button type="button" className="clean" onClick={cleanProxies} disabled={cleaning || collecting || !proxyCount}>
+                {cleaning ? `청소 ${cleanProg.done}/${cleanProg.total}` : "프록시 청소"}
               </button>
               복귀(분)
               <input
                 type="number" min={0.5} max={120} step={0.5}
                 value={reviveMin}
                 onChange={(e) => setReviveMin(e.target.value)}
-                style={{ width: 64 }}
+                style={{ width: 56 }}
               />
             </span>
           </div>

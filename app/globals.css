@@ -68,3 +68,6 @@ button.collect:disabled { opacity:.6; }
 .lifebox { display:flex; flex-wrap:wrap; gap:14px; align-items:center; background:#f7fdf9; border:1px solid #d6ecdd; border-radius:8px; padding:9px 12px; margin-top:8px; font-size:12.5px; }
 .lifebox b { color:#0a8a43; }
 .lifebox span { color:#333; }
+
+button.clean { background:#fff; color:#03c75a; border:1px solid #03c75a; padding:6px 12px; }
+button.clean:disabled { opacity:.5; }

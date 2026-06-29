@@ -166,6 +166,24 @@ function parseCards(blockHtml) {
   return cards;
 }
 
+async function pingProxy(proxyUrl, timeoutMs = 2500) {
+  let agent = null;
+  try {
+    agent = new ProxyAgent({ uri: proxyUrl, headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
+    const res = await request("https://m.naver.com/", {
+      method: "HEAD",
+      dispatcher: agent,
+      headers: { "user-agent": "Mozilla/5.0", "accept-encoding": "gzip" },
+    });
+    // 어떤 HTTP 응답이든 오면 = 프록시 연결은 살아있음 (네이버 차단여부는 별개)
+    return res.statusCode > 0;
+  } catch {
+    return false;
+  } finally {
+    if (agent) { try { await agent.close(); } catch {} }
+  }
+}
+
 async function fetchSerp(keyword, cookie, uaIdx = 0, proxyUrl = null, timeoutMs = 9000) {
   const url =
     "https://m.search.naver.com/search.naver?where=m&sm=mtp_hty.top&query=" +
@@ -220,6 +238,14 @@ export async function POST(req) {
     let timeoutMs = parseInt(body.timeoutMs, 10);
     if (!Number.isFinite(timeoutMs)) timeoutMs = 9000;
     timeoutMs = Math.min(Math.max(timeoutMs, 1500), 15000);
+
+    // 핑 모드: 프록시 생존만 빠르게 확인 (사전 청소용)
+    if (body.ping === true) {
+      const one = proxies[0];
+      if (!one) return Response.json({ alive: false });
+      const alive = await pingProxy(one, Math.min(timeoutMs, 3000));
+      return Response.json({ alive });
+    }
 
     if (!keyword) return Response.json({ error: "키워드가 비어 있습니다." }, { status: 400 });
 
